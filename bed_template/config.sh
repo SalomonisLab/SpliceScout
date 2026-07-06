@@ -51,11 +51,18 @@ BED_MODE="intron"
 # 5) RESOURCES. BAMtoBED is a single Python process (I/O+parse bound, not threaded).
 THREADS=1                         # -n (LSF slots per job)
 MEM_MB=32000                      # -M per job
-WALL="16:00"                      # -W per job (HH:MM)
+WALL="1108:00"                    # -W per job (HH:MM) — queue MAX (66480 min) so jobs never hit walltime
 LSF_QUEUE=""                      # "" = cluster default queue
 
 # 6) AUTOMATION.
 JOB_TAG="bed"                     # namespaces this run's LSF job names (make it unique per run)
+ALERT_EMAIL=""                    # baked at deploy from the PC settings -> cluster jobs email the user on error/milestone ('' = off)
+DIAGNOSE_ON_STALL=1               # on a STALL, ask the cluster CPU LLM (if installed) for a diagnosis + email it
+DIAGNOSE_AUTOFIX=0                # 1 = also let the AI APPLY a SAFE whitelisted fix (quarantine bed / re-arm), budget-capped
+DIAGNOSE_MAX_REARMS=2             # cap on AI auto re-arms before it stops and leaves the stall for a human
+DIAGNOSE_AI_HOME="/data/salomonis-archive/LabFiles/SpliceScout_AI"   # self-contained CPU LLM (conda env + GGUF model)
+DIAGNOSE_MODEL_PATH=""            # optional: full path to a specific .gguf to use (overrides the model search)
+DIAGNOSE_MODEL_DIR=""             # optional: dir to CACHE the model so future runs reuse it ('' = <PIPELINE_ROOT>/.splicescout_ai/models)
 WATCHDOG_INTERVAL_MIN=30          # how often the self-driving watchdog re-checks
 MAX_STALL_PASSES=2                # consecutive no-progress passes before giving up (STALLED)
 ABSOLUTE_MAX_PASSES=960           # HARD backstop: STALL after this many watchdog passes no matter what

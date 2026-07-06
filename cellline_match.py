@@ -182,11 +182,18 @@ def _write_acc_lists(P, keep_rows):
     combined = sorted({(r.get("Run") or "").strip() for r in keep_rows if (r.get("Run") or "").strip()})
     with open(_safe_open(P.sra_acc_list), "w", encoding="utf-8") as f:
         f.write("\n".join(combined) + ("\n" if combined else ""))
-    by_study = {}
+    # Each unique run goes into EXACTLY ONE study's list. A run shared by many GEO series (K562: often 100+
+    # series point at the SAME SRA study) must be downloaded + STAR-aligned ONCE, not once per series -- else
+    # the cluster launches ~one job per (run x series): here 8,421 runs would become ~1.15M jobs. The per-
+    # cell-line PSI is a SINGLE grouped (drug-vs-control) analysis that reads every run's BED regardless of
+    # which study folder holds it, so collapsing to one folder per run just avoids re-downloading/re-aligning
+    # identical reads. by_study still spans every study that has at least one first-seen run.
+    by_study, _assigned = {}, set()
     for r in keep_rows:
         run_acc = (r.get("Run") or "").strip()
         gse = (r.get("GSE_Series") or "").strip() or "unknown"
-        if run_acc:
+        if run_acc and run_acc not in _assigned:
+            _assigned.add(run_acc)
             by_study.setdefault(gse, set()).add(run_acc)
     for gse, runs in by_study.items():
         d = os.path.join(P.by_study_dir, gse)

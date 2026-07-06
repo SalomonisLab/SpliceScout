@@ -1292,7 +1292,7 @@ def run_pipeline(cfg, P, reporter=NULL, select_fn=None, secrets=None, cluster_fi
                 if begin("concordance_bundle"):
                     concordance_built = concordance_deploy.build_concordance_bundle(
                         P, deep, bam_out_root, getattr(cfg, "concordance_cfg", None),
-                        download_job_tag=dl_tag, reporter=reporter)
+                        download_job_tag=dl_tag, reporter=reporter, ai_cfg=_ai_cfg_from(cfg))
                     mark("concordance_bundle")
                 reporter.complete_stage("concordance_bundle")
 

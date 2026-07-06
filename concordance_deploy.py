@@ -113,9 +113,12 @@ def _load_registry():
         return {}
 
 
-def _resolve_atlas(sel, species, override=None):
-    """Return (atlas_key, atlas_obj) for this run, or (None, None). override = a GUI CANCER_ATLAS key
-    (an atlases.<key>) wins; else map sel['canonical'] (+ aliases) via celllines.<norm>."""
+def _resolve_atlas(sel, species, override=None, ai_cfg=None):
+    """Return (atlas_key, atlas_obj) for this run, or (None, None). Resolution order:
+      1. a GUI CANCER_ATLAS override (an atlases.<key>) wins;
+      2. the explicit celllines.<norm> map;
+      3. an AI FALLBACK that maps the cell line to the best available atlas (only when ai_cfg is supplied).
+    None => concordance no-ops for this line (until an atlas is set in the GUI)."""
     reg = _load_registry()
     atlases = (reg or {}).get("atlases", {})
     if override and str(override).strip().lower() not in ("", "auto") and override in atlases:
@@ -131,6 +134,90 @@ def _resolve_atlas(sel, species, override=None):
             atlas = atlases[key]
             if not species or not atlas.get("species") or atlas["species"] == species:
                 return key, atlas
+    return _ai_resolve_atlas(sel, atlases, species, ai_cfg)   # no explicit mapping -> AI fallback (or None)
+
+
+_ATLAS_INSTRUCTIONS = (
+    "You map a human CANCER CELL LINE to the single best-matching cancer atlas for splicing concordance.\n"
+    "You receive a JSON object with `cell_line` (canonical name), `aliases`, and `atlases` (an array of "
+    "{key,label} -- the ONLY atlases available). Work out the cell line's cancer of origin (tissue + "
+    "subtype) and pick the atlas whose cancer type matches best. Rules:\n"
+    "- Call the emit tool ONCE with exactly one result.\n"
+    "- atlas_key: EXACTLY one of the provided keys, or 'none' if no atlas is a reasonable cancer-of-origin "
+    "match. Prefer the same tissue/lineage (e.g. a myeloid-leukemia line -> an AML atlas; a lung "
+    "adenocarcinoma line -> a lung atlas; a breast line -> a breast atlas). NEVER invent a key.\n"
+    "- reason: a few words (e.g. 'K562 = CML, closest myeloid = aml_mds')."
+)
+
+_ATLAS_TOOL = {
+    "name": "emit_atlas_pick",
+    "description": "Return one result: the best-matching cancer atlas key for the cell line, or 'none'.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["results"],
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["atlas_key", "reason"],
+                    "properties": {
+                        "atlas_key": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
+            }
+        },
+    },
+}
+
+
+def _ai_resolve_atlas(sel, atlases, species, ai_cfg):
+    """AI FALLBACK: with no registry mapping, ask the model to map the cell line to the best AVAILABLE atlas
+    key (grounded in the list, so it can't invent one). Returns (key, atlas) or (None, None). Best-effort:
+    any failure (no key/provider, bad reply, endpoint down) yields (None, None) so the stage just no-ops."""
+    if not ai_cfg or not sel:
+        return None, None
+    opts = [{"key": k, "label": (a or {}).get("label", k)}
+            for k, a in atlases.items()
+            if not (a or {}).get("cell_line_specific")          # ENCODE cell-line atlases: explicit-map only
+            and (not species or not (a or {}).get("species") or (a or {}).get("species") == species)]
+    if not opts:
+        return None, None
+    user = {"cell_line": sel.get("canonical", ""),
+            "aliases": list(sel.get("aliases", []) or []), "atlases": opts}
+
+    async def _go():
+        import llm_providers
+        provider = llm_providers.normalize_provider(ai_cfg.get("provider", "anthropic"))
+        if provider != "ollama" and not llm_providers.have_key(provider):
+            return None
+        model = llm_providers.resolve_model(provider, ai_cfg.get("model"))
+        client = llm_providers.make_client(provider, ai_cfg.get("max_retries", 8),
+                                           base_url=ai_cfg.get("base_url"))
+        try:
+            results, _ = await llm_providers.classify(
+                client, provider, model, _ATLAS_INSTRUCTIONS, user, _ATLAS_TOOL,
+                ai_cfg.get("max_tokens", 2000), disable_reasoning=True)   # a lookup, not a reasoning task
+            return results
+        finally:
+            await llm_providers.close_client(client)
+
+    try:
+        import asyncio
+        results = asyncio.run(_go())
+    except Exception as e:
+        print(f"  CONCORDANCE: AI atlas fallback failed ({e}) -> no atlas resolved")
+        return None, None
+    key = str((results[0] or {}).get("atlas_key", "")).strip() if results else ""
+    if key and key.lower() != "none" and key in atlases:
+        atlas = atlases[key]
+        if not species or not atlas.get("species") or atlas["species"] == species:
+            print(f"  CONCORDANCE: AI mapped {sel.get('canonical', '?')!r} -> atlas '{key}' "
+                  f"({(results[0] or {}).get('reason', '')})")
+            return key, atlas
     return None, None
 
 
@@ -229,7 +316,7 @@ def _write_concordance_instructions(P, vals, psi_root, concord_root, atlas_key, 
         f.write(txt)
 
 
-def build_concordance_bundle(P, sel, bam_out_root, concord_cfg, download_job_tag="sra", reporter=NULL):
+def build_concordance_bundle(P, sel, bam_out_root, concord_cfg, download_job_tag="sra", reporter=NULL, ai_cfg=None):
     """Assemble runtable/concordance/ (filled config.sh + vendored scorer/ranker + launcher + queries.tsv),
     zip it, return a summary. Returns None if the template is missing."""
     if not os.path.isdir(CONCORDANCE_TEMPLATE_DIR):
@@ -263,7 +350,7 @@ def build_concordance_bundle(P, sel, bam_out_root, concord_cfg, download_job_tag
 
     # resolve the cancer atlas (registry; GUI 'cancer_atlas' override) + ship queries.tsv
     override = (concord_cfg or {}).get("CANCER_ATLAS") or (concord_cfg or {}).get("cancer_atlas")
-    atlas_key, atlas_obj = _resolve_atlas(sel, vals["SPECIES"], override)
+    atlas_key, atlas_obj = _resolve_atlas(sel, vals["SPECIES"], override, ai_cfg=ai_cfg)
     nqueries = 0
     if atlas_obj:
         nqueries = _write_queries_tsv(os.path.join(P.concordance_dir, "queries.tsv"), atlas_obj, concord_root)

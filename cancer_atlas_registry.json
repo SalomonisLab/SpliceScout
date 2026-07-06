@@ -11,7 +11,58 @@
     "calu3": "lung",
     "h1975": "lung",
     "hcc827": "lung",
-    "pc9": "lung"
+    "pc9": "lung",
+    "hela": "cesc",
+    "mcf7": "brca",
+    "mdamb231": "brca",
+    "mdamb468": "brca",
+    "t47d": "brca",
+    "bt549": "brca",
+    "skbr3": "brca",
+    "hepg2": "hepg2_encode",
+    "huh7": "lihc",
+    "hct116": "coad",
+    "ht29": "coad",
+    "sw480": "coad",
+    "dld1": "coad",
+    "rko": "coad",
+    "caco2": "coad",
+    "pc3": "prad",
+    "du145": "prad",
+    "lncap": "prad",
+    "22rv1": "prad",
+    "a375": "skcm",
+    "u87": "gbm",
+    "u87mg": "gbm",
+    "u251": "gbm",
+    "u118": "gbm",
+    "a172": "gbm",
+    "ln229": "gbm",
+    "panc1": "paad",
+    "miapaca2": "paad",
+    "bxpc3": "paad",
+    "ovcar3": "ov",
+    "ovcar8": "ov",
+    "skov3": "ov",
+    "a2780": "ov",
+    "igrov1": "ov",
+    "ags": "stad",
+    "mkn45": "stad",
+    "t24": "blca",
+    "5637": "blca",
+    "786o": "kirc",
+    "caki1": "kirc",
+    "a498": "kirc",
+    "ishikawa": "ucec",
+    "u2os": "sarc",
+    "saos2": "sarc",
+    "ht1080": "sarc",
+    "hos": "sarc",
+    "mg63": "sarc",
+    "cal27": "hnsc",
+    "fadu": "hnsc",
+    "detroit562": "hnsc",
+    "k562": "k562"
   },
   "atlases": {
     "aml_mds": {
@@ -43,6 +94,309 @@
           "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Completed/LUSC/Oncosplice_clusters/MergedResult.txt"
         }
       ]
+    },
+    "blca": {
+      "species": "Hs",
+      "label": "Bladder urothelial carcinoma (TCGA BLCA OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "BLCA",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/BLCA/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/BLCA/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "brca": {
+      "species": "Hs",
+      "label": "Breast invasive carcinoma (TCGA BRCA OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "BRCA",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/BRCA/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/BRCA/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "cesc": {
+      "species": "Hs",
+      "label": "Cervical squamous cell carcinoma (TCGA CESC OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "CESC",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/CESC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/CESC/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "coad": {
+      "species": "Hs",
+      "label": "Colon adenocarcinoma (TCGA COAD OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "COAD",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/COAD/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/COAD/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "esca": {
+      "species": "Hs",
+      "label": "Esophageal carcinoma (TCGA ESCA OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "ESCA",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/ESCA/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/ESCA/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "gbm": {
+      "species": "Hs",
+      "label": "Glioblastoma multiforme (TCGA GBM OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "GBM",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/GBM/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/GBM/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "hnsc": {
+      "species": "Hs",
+      "label": "Head & neck squamous cell carcinoma (TCGA HNSC OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "HNSC",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/HNSC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/HNSC/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "kich": {
+      "species": "Hs",
+      "label": "Kidney chromophobe (TCGA KICH OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "KICH",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/KICH/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/KICH/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "kirc": {
+      "species": "Hs",
+      "label": "Kidney renal clear cell carcinoma (TCGA KIRC OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "KIRC",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/KIRC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/KIRC/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "kirp": {
+      "species": "Hs",
+      "label": "Kidney renal papillary cell carcinoma (TCGA KIRP OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "KIRP",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/KIRP/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/KIRP/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "lgg": {
+      "species": "Hs",
+      "label": "Brain lower-grade glioma (TCGA LGG OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "LGG",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/LGG/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/LGG/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "lihc": {
+      "species": "Hs",
+      "label": "Liver hepatocellular carcinoma (TCGA LIHC OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "LIHC",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/LIHC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/LIHC/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "ov": {
+      "species": "Hs",
+      "label": "Ovarian serous cystadenocarcinoma (TCGA OV OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "OV",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/OV/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/OV/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "paad": {
+      "species": "Hs",
+      "label": "Pancreatic adenocarcinoma (TCGA PAAD OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "PAAD",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/PAAD/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/PAAD/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "pcpg": {
+      "species": "Hs",
+      "label": "Pheochromocytoma & paraganglioma (TCGA PCPG OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "PCPG",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/PCPG/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/PCPG/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "prad": {
+      "species": "Hs",
+      "label": "Prostate adenocarcinoma (TCGA PRAD OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "PRAD",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/PRAD/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/PRAD/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "read": {
+      "species": "Hs",
+      "label": "Rectum adenocarcinoma (TCGA READ OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "READ",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/READ/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/READ/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "sarc": {
+      "species": "Hs",
+      "label": "Sarcoma (TCGA SARC OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "SARC",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/SARC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/SARC/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "skcm": {
+      "species": "Hs",
+      "label": "Skin cutaneous melanoma (TCGA SKCM OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "SKCM",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/SKCM/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/SKCM/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "stad": {
+      "species": "Hs",
+      "label": "Stomach adenocarcinoma (TCGA STAD OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "STAD",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/STAD/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/STAD/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "tgct": {
+      "species": "Hs",
+      "label": "Testicular germ cell tumors (TCGA TGCT OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "TGCT",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/TGCT/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/TGCT/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "thca": {
+      "species": "Hs",
+      "label": "Thyroid carcinoma (TCGA THCA OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "THCA",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/THCA/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/THCA/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "ucec": {
+      "species": "Hs",
+      "label": "Uterine corpus endometrial carcinoma (TCGA UCEC OncoSplice subtypes)",
+      "queries": [
+        {
+          "name": "UCEC",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/UCEC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "counts_kind": "mergedresult",
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Temporary/UCEC/Oncosplice_clusters/MergedResult.txt"
+        }
+      ]
+    },
+    "k562": {
+      "species": "Hs",
+      "cell_line_specific": true,
+      "label": "K562 (ENCODE RBP-perturbation splicing signatures, hg38)",
+      "queries": [
+        {
+          "name": "K562-ENCODE",
+          "query_dir": "/data/salomonis2/NCI-R01/Signatures/hg38-signatures/K562/AltResults/AlternativeOutput/Events-dPSI_0.1_rawp",
+          "counts_kind": "none",
+          "counts_file": ""
+        }
+      ]
+    },
+    "hepg2_encode": {
+      "species": "Hs",
+      "cell_line_specific": true,
+      "label": "HepG2 (ENCODE RBP-perturbation splicing signatures, hg38)",
+      "queries": [
+        {
+          "name": "HepG2-ENCODE",
+          "query_dir": "/data/salomonis2/NCI-R01/Signatures/hg38-signatures/HepG2/AltResults/AlternativeOutput/Events-dPSI_0.1_rawp",
+          "counts_kind": "none",
+          "counts_file": ""
+        }
+      ]
     }
-  }
+  },
+  "_fallback": "When a cell line is not in 'celllines', concordance_deploy._resolve_atlas asks the AI to map it to the best-matching atlas key above (grounded in this list; 'none' if no fit). The GUI 'cancer atlas' field still overrides everything."
 }

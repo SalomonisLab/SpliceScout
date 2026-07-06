@@ -1,0 +1,30 @@
+# --- run data & secrets (NEVER commit) ---
+# every run's config.json holds the NCBI API key; xml_cache is tens of GB
+runs/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- local / transient ---
+_last_url.txt
+*.log
+.DS_Store
+Thumbs.db
+
+# --- large external reference DBs (AltAnalyze) — downloaded, not source ---
+bed_template/altanalyze/refs/
+psi_template/altanalyze/refs/
+
+# --- bulk data / models (never in git) ---
+*.gguf
+*.bin
+*.sra
+*.fastq
+*.fastq.gz
+*.bam
+*.bam.bai
+*.bed.gz

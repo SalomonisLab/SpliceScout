@@ -28,7 +28,9 @@ bed_jobname() {
   local s="$1"
   s="${s//[^A-Za-z0-9_.-]/_}"               # only LSF-safe characters
   if [ "${#s}" -gt 40 ]; then               # cap length: readable head + stable hash tail
-    local h; h="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+    # checksum AND byte-count (was checksum only) so two different long labels must collide on BOTH 32-bit
+    # fields before they alias to one job name -> collision becomes vanishingly unlikely.
+    local h; h="$(printf '%s' "$1" | cksum | awk '{print $1"x"$2}')"
     s="${s:0:31}_${h}"
   fi
   printf '%s_bed_%s' "$JOB_TAG" "$s"
@@ -50,10 +52,31 @@ bed_file_ok() {
   tail -n 1 "$f" 2>/dev/null | awk 'NF>=3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {ok=1} END{exit ok?0:1}'
 }
 
-# Presence test for a content-bearing BED: STRICT_BED_CHECK=1 (new runs) uses bed_file_ok; OFF by default
-# (so a live mid-run deployment keeps the lenient [ -s ] and doesn't re-evaluate already-published BEDs).
+# An __intronJunction.bed is OK if it is EITHER legitimately EMPTY (BAMtoExonBED hard-gates intron-retention
+# junctions, so a perfectly good sample can produce 0 rows) OR a fully-intact BED12 -- EVERY data line is 12
+# tab columns with integer chromStart/chromEnd (track/browser/# headers skipped); early-exits on the first
+# bad line. A NON-EMPTY but corrupt/truncated/interleaved intron bed is REJECTED. WHY this exists: the bare
+# -e check below let a corrupt-but-present intron bed pass as DONE, its BAM was deleted (DELETE_BAM_AFTER_BED),
+# and the corrupt bed then DEADLOCKED AltAnalyze's PSI import -- RNASeq.py's bad-line handler is the undefined
+# `print t; force_exception` -> NameError -> a multiprocessing worker dies -> the parent hangs for the entire
+# walltime with no output (observed LIVE: 9 corrupt A549 intron beds froze PSI for 14h). A mid-file scan is
+# required because the corruption was NOT at the tail, so the last-line bed_file_ok was blind to it.
+bed_intron_ok() {
+  local f="$1"
+  [ -e "$f" ] || return 1
+  [ -s "$f" ] || return 0                                  # legitimately empty -> OK
+  [ -z "$(tail -c1 "$f" 2>/dev/null)" ] || return 1        # non-empty -> must end in a newline
+  LC_ALL=C awk -F'\t' '/^(track|browser|#)/{next} (NF!=12 || $2!~/^[0-9]+$/ || $3!~/^[0-9]+$/){exit 1}' "$f"
+}
+
+# Completeness test for a content-bearing BED. RECONCILED: run_bed_job.sh validates its outputs with
+# bed_file_ok before the atomic publish, so the watchdog's "is this BAM done" predicate MUST use the
+# SAME check -- otherwise the watchdog could count a truncated-but-nonempty [ -s ] BED as DONE that
+# run_bed_job would (correctly) reject, and the two disagree. bed_file_ok is now the DEFAULT. The
+# lenient [ -s ] survives ONLY as an explicit opt-out (STRICT_BED_CHECK=0), for a live mid-run
+# deployment that must not re-evaluate already-published BEDs.
 bed_present() {
-  if [ "${STRICT_BED_CHECK:-0}" = "1" ]; then bed_file_ok "$1"; else [ -s "$1" ]; fi
+  if [ "${STRICT_BED_CHECK:-1}" = "0" ]; then [ -s "$1" ]; else bed_file_ok "$1"; fi
 }
 
 bed_done() {
@@ -61,21 +84,64 @@ bed_done() {
   bed_present "${stem}__junction.bed" || return 1
   case "${BED_MODE:-intron}" in
     exon) bed_present "${stem}__exon.bed" ;;
-    both) bed_present "${stem}__exon.bed" && [ -e "${stem}__intronJunction.bed" ] ;;
-    *)    [ -e "${stem}__intronJunction.bed" ] ;;
+    # 'both' produces the exon bed BEST-EFFORT but NEVER blocks on it: PSI/AltAnalyze splicing uses
+    # junction + intronJunction, not __exon.bed, and the exon pass OOM-truncates on very large BAMs --
+    # so requiring a valid exon bed here would resubmit those samples forever -> STALL (LIVE A549 2026-06).
+    both) bed_intron_ok "${stem}__intronJunction.bed" ;;
+    *)    bed_intron_ok "${stem}__intronJunction.bed" ;;
   esac
 }
+
+# ---- per-sample failure tracking: drop a BAM after BED_MAX_FAILS failed conversions (user 2026-06-22) ---
+# Mirrors the download stage's drop-after-N. A BAM whose BED conversion fails BED_MAX_FAILS times (e.g. a
+# truncated/odd BAM the converter can't handle) is DROPPED so one bad sample can't STALL the whole stage:
+# per-sample attempts live in $PIPELINE_ROOT/.attempts/<label>.n; a <label>.dropped marker stops further
+# resubmits; the drop is logged to bed_dropped.txt and COUNTED toward completion (done_n + dropped >= exp).
+: "${BED_MAX_FAILS:=3}"
+BED_ATTEMPTS_DIR="$PIPELINE_ROOT/.attempts"
+BED_DROPPED_LIST="$PIPELINE_ROOT/bed_dropped.txt"
+bed_attempts()   { cat "$BED_ATTEMPTS_DIR/$1.n" 2>/dev/null || echo 0; }      # $1=label -> attempt count
+bed_is_dropped() { [ -f "$BED_ATTEMPTS_DIR/$1.dropped" ]; }                   # $1=label
+bed_bump_attempt() {                                                          # $1=label -> echoes NEW count
+  mkdir -p "$BED_ATTEMPTS_DIR" 2>/dev/null
+  local n=$(( $(bed_attempts "$1") + 1 )); echo "$n" > "$BED_ATTEMPTS_DIR/$1.n"; echo "$n"
+}
+bed_drop_sample() {                                                           # $1=label $2=reason
+  [ -f "$BED_ATTEMPTS_DIR/$1.dropped" ] && return 0          # idempotent
+  mkdir -p "$BED_ATTEMPTS_DIR" 2>/dev/null; : > "$BED_ATTEMPTS_DIR/$1.dropped"
+  printf '%s\t%s\tafter %s attempts\t%s\n' "$1" "${2:-conversion}" "$(bed_attempts "$1")" "$(date '+%Y-%m-%d %H:%M:%S')" >> "$BED_DROPPED_LIST"
+}
+# Count dropped samples with a PURE-BASH loop (NOT ls|wc / grep -c -> unreliable on compute nodes).
+bed_dropped_count() { local n=0 f; for f in "$BED_ATTEMPTS_DIR"/*.dropped; do [ -e "$f" ] && n=$((n+1)); done; echo "$n"; }
 
 # Submit ONE BAM. Arg: label (= BAM basename without .bam). Echoes the LSF job id.
 bed_submit_sample() {
   local label="$1" jn
   jn="$(bed_jobname "$label")"
   bed_qopt
+  # WALLTIME / MEM SELF-HEAL: if THIS sample's previous attempt hit an LSF limit, escalate its -W/-M for the
+  # retry (else the same limit kills it again and it's dropped). Per-sample + LOCAL. WALL -> queue max on a
+  # walltime kill; MEM +50% per mem kill. Reads the last termination from the sample's -o log (awk-safe).
+  local _wall="$WALL" _mem="$MEM_MB" _jo="$LOG_DIR/bed_${label}.out" _t _nm
+  if [ -f "$_jo" ]; then
+    _t=$(awk 'match($0,/TERM_(RUNLIMIT|MEMLIMIT)/){m=substr($0,RSTART,RLENGTH)} END{print m}' "$_jo" 2>/dev/null)
+    _nm=$(awk '/TERM_MEMLIMIT/{n++} END{print n+0}' "$_jo" 2>/dev/null); _nm=${_nm:-0}
+    [ "$_t" = "TERM_RUNLIMIT" ] && _wall="1108:00"
+    [ "${_nm:-0}" -gt 0 ] && _mem=$(( _mem + _mem * _nm / 2 ))
+  fi
   bsub -L /bin/bash ${QOPT[@]+"${QOPT[@]}"} \
-       -J "$jn" -n "$THREADS" -W "$WALL" -M "$MEM_MB" \
+       -J "$jn" -n "$THREADS" -W "$_wall" -M "$_mem" \
        -R "span[hosts=1]" \
        -o "$LOG_DIR/bed_${label}.out" -e "$LOG_DIR/bed_${label}.err" \
        "$SCRIPTS_DIR/run_bed_job.sh" "$label" | bed_jobid
+  # Stamp the submit time ONLY on a successful bsub (PIPESTATUS[0] = bsub's own rc, not bed_jobid's).
+  # bed_job_ended() compares the job's -o log mtime to this stamp to tell "the last attempt ENDED" from
+  # "still running" -- so the watchdog never counts a running job as a failed conversion (the false-drop ->
+  # spurious-meltdown bug). A failed bsub leaves no stamp, so the sample is simply resubmitted next pass.
+  if [ "${PIPESTATUS[0]:-1}" -eq 0 ]; then
+    mkdir -p "$BED_ATTEMPTS_DIR" 2>/dev/null
+    : > "$BED_ATTEMPTS_DIR/${label}.lastsub" 2>/dev/null
+  fi
 }
 
 # Non-empty rows in the BAM list = the fixed-at-launch denominator. Counted with a PURE-BASH loop, NOT
@@ -121,11 +187,28 @@ bed_live_work_count() { bed_count_work "$(bed_live_names)"; }
 # bjobs snapshot of live job NAMES. CAPTURE ITS rc AT THE CALL SITE: LIVE="$(bed_snapshot)"; BED_SNAP_RC=$?
 # (command substitution is a SUBSHELL, so a global set inside is lost -- read $? in the parent). rc!=0 =>
 # bjobs FAILED -> skip the pass (an empty/partial list would resubmit running jobs or falsely finalize).
-bed_snapshot() { bjobs -noheader -o job_name 2>/dev/null; }
+bed_snapshot() { bjobs -noheader -o 'job_name:90' 2>/dev/null | awk '{print $1}'; }   # :90 = wide column so
+# long ${JOB_TAG}_bed_<label> names are NOT truncated (the default width truncates them, which silently
+# breaks bed_has_live's exact match); awk strips the column padding so the exact match still works.
 
-# Targeted, fail-CLOSED liveness re-check for ONE job name before an expensive resubmit -- a SECOND
-# independent bjobs query a partial bulk snapshot can't fool. Live -> 0 (skip the resubmit).
+# Targeted liveness re-check for ONE job name before an expensive resubmit -- a SECOND independent bjobs
+# query a partial bulk snapshot can't fool. Live -> 0 (skip the resubmit).
 bed_job_is_live() { bjobs -noheader -o stat -J "$1" 2>/dev/null | grep -qE 'RUN|PEND'; }
+
+# Has this sample been submitted at least once? (a .lastsub stamp exists). Distinguishes a never-run sample
+# (resubmit, no fail count) from one whose attempt must be checked with bed_job_ended before counting a fail.
+bed_job_submitted() { [ -f "$BED_ATTEMPTS_DIR/$1.lastsub" ]; }
+
+# Did this sample's LAST attempt actually TERMINATE? LSF writes a job's -o log only when the job ENDS, so an
+# -o log NEWER than the last submit stamp means the latest attempt finished (success or failure); OLDER (or
+# absent) means it's still running -- even if a flaky/overloaded bjobs momentarily reported it not-live. This
+# is the authoritative "is it a real failure" gate that prevents false drops -> spurious meltdown STALLs.
+bed_job_ended() {
+  local jo="$LOG_DIR/bed_$1.out" sub="$BED_ATTEMPTS_DIR/$1.lastsub"
+  [ -f "$jo" ] || return 1
+  [ -f "$sub" ] || return 0          # log exists but no submit stamp -> treat as ended (legacy/first run)
+  [ "$jo" -nt "$sub" ]               # -o written AFTER the last submit -> the latest attempt ended
+}
 
 # Exactly-once finalization claim via an atomic mkdir (NFS-safe where flock degrades). First caller -> 0.
 bed_finalize_once() { mkdir "$PIPELINE_ROOT/.finalized.lock" 2>/dev/null; }
@@ -157,12 +240,28 @@ bed_nudge_watchdog() {
   # bjobs FAILED / was overloaded -> do NOT nudge. A spurious 0 under load is EXACTLY what spawned ~1000
   # a549_bed watchdogs. The timed poll still finalizes, so a skipped nudge only loses acceleration.
   [ "$nlive" -eq 1 ] || return 0
+  # DOUBLE-FINALIZE GUARD: do NOT queue a new watchdog if one already exists (a timed-poll successor is
+  # always armed reschedule-first, and another job may have just nudged). Two watchdogs that both see
+  # nlive==0 could race the finalize claim/cleanup. A targeted bjobs check for ANY live ${JOB_TAG}_watchdog
+  # (RUN or PEND) means our nudge only ADDS a pass when none is queued -- the timed poll stays the fallback.
+  if bjobs -noheader -o stat -J "${JOB_TAG}_watchdog" 2>/dev/null | grep -qE 'RUN|PEND'; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] nudge: '$who' last live work job, but a ${JOB_TAG}_watchdog is already queued -> skip (no double-arm)" \
+         >> "$PIPELINE_ROOT/watchdog.log" 2>/dev/null || true
+    return 0
+  fi
   bed_qopt
   local DEPW=(); [ -n "${LSB_JOBID:-}" ] && DEPW=(-w "ended(${LSB_JOBID})")
   bsub -L /bin/bash -n 1 -M 1000 -W 20 -J "${JOB_TAG}_watchdog" \
        ${DEPW[@]+"${DEPW[@]}"} \
        -o "$LOG_DIR/watchdog.out" -e "$LOG_DIR/watchdog.err" \
        ${QOPT[@]+"${QOPT[@]}"} "$SCRIPTS_DIR/watchdog.sh" >/dev/null 2>&1
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] nudge: '$who' last live work job -> watchdog queued on ended(${LSB_JOBID:-?})" \
-       >> "$PIPELINE_ROOT/watchdog.log" 2>/dev/null || true
+  # LOG the bsub rc (was logged 'queued' UNCONDITIONALLY, hiding a failed accelerator submit). The timed
+  # poll is still the fallback, so a failed nudge only loses acceleration -- but now it leaves a trace.
+  if [ "$?" -eq 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] nudge: '$who' last live work job -> watchdog queued on ended(${LSB_JOBID:-?})" \
+         >> "$PIPELINE_ROOT/watchdog.log" 2>/dev/null || true
+  else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] nudge: '$who' bsub FAILED to queue the watchdog accelerator (timed poll remains the fallback)" \
+         >> "$PIPELINE_ROOT/watchdog.log" 2>/dev/null || true
+  fi
 }
