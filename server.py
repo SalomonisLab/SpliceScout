@@ -1192,6 +1192,14 @@ def main():
     # serve relative to this script so runs/ lands next to the pipeline code
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+    # the ~100 MB AltAnalyze exon ref ships gzip'd (GitHub's 100 MB file limit); recreate the plain-text
+    # copy the BED step uploads. Idempotent -> only the first launch pays the (few-second) decompress.
+    try:
+        import ensure_refs
+        ensure_refs.ensure_ref_files()
+    except Exception as _e:
+        print(f"   [refs] auto-decompress skipped: {_e}")
+
     # claim this instance's identity -> the name from the launcher ($SPLICESCOUT_INSTANCE / --instance),
     # else the lowest free sra1 / sra2 / sra3 ... (released on exit; a dead instance's tag is reclaimed)
     preferred = (a.instance or "").strip() or _resolve_instance_name()

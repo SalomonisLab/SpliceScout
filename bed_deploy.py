@@ -246,6 +246,14 @@ def _upload_ref_idempotent(host, port, user, keyfile, password, bed_root, specie
     the same byte size already exists there (so the ~100 MB ref isn't re-pushed every run)."""
     local = os.path.join(BED_TEMPLATE_DIR, "altanalyze", "refs", species, f"{species}_Ensembl_exon.txt")
     if not os.path.exists(local):
+        # the exon ref ships gzip'd in git; if only the .gz is present (a fresh clone that never launched
+        # the UI), expand it now so a standalone deploy still finds the plain-text reference.
+        try:
+            import ensure_refs
+            ensure_refs.ensure_ref_files()
+        except Exception:
+            pass
+    if not os.path.exists(local):
         print(f"  BED SUBMIT: no vendored exon ref for species {species!r} ({local}) -> NOT uploading "
               "(the cluster setup.sh will flag a missing EXON_REF)")
         return

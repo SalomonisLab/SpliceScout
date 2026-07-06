@@ -17,6 +17,11 @@ def _start_server():
     import atexit
     import server
     os.chdir(os.path.dirname(os.path.abspath(server.__file__)))
+    try:                                # exon ref ships gzip'd -> recreate the plain-text copy (idempotent)
+        import ensure_refs
+        ensure_refs.ensure_ref_files()
+    except Exception:
+        pass
     server._INSTANCE_TAG, server._INSTANCE_LOCK_PATH = server._claim_instance_slot(server._resolve_instance_name())
     atexit.register(server._release_instance_slot)
     httpd, port = server._bind_server("127.0.0.1", 8765)

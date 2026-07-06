@@ -77,6 +77,9 @@ if not exist "%~dp0vendor\plotly.min.js" (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "try{ [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://cdn.plot.ly/plotly-2.35.2.min.js' -OutFile '%~dp0vendor\plotly.min.js' }catch{ Write-Host 'Plotly download failed - the Plots tab will need internet once.' }"
 )
 
+REM ---- 3b2) Decompress vendored reference DB(s) shipped gzip'd (first run only, ~18 MB -> ~100 MB) ----
+%PY% ensure_refs.py
+
 REM ---- 3c) Optional: tray libraries (pystray + Pillow) for the system-tray launcher ----
 %PY% -c "import pystray, PIL" >nul 2>&1
 if errorlevel 1 (

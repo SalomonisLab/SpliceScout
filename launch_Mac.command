@@ -75,6 +75,9 @@ if [ ! -f "vendor/plotly.min.js" ]; then
     || echo "Plotly download failed - the Plots tab will need internet once."
 fi
 
+# ---- 3c) Decompress vendored reference DB(s) shipped gzip'd (first run only, ~18 MB -> ~100 MB) ----
+"$PY" ensure_refs.py
+
 # ---- 4) Launch the web UI (opens your browser) ----
 echo "Starting the web UI - a browser window will open shortly."
 echo "Keep this window open while you work; close it (or press Ctrl+C) to stop."

@@ -12,12 +12,15 @@ venv/
 # --- local / transient ---
 _last_url.txt
 *.log
+*.part
 .DS_Store
 Thumbs.db
 
 # --- large external reference DBs (AltAnalyze) — downloaded, not source ---
-bed_template/altanalyze/refs/
-psi_template/altanalyze/refs/
+# Exon refs ship GZIPPED (<name>.txt.gz, ~18 MB) and are auto-decompressed on launch by ensure_refs.py;
+# track the committed .gz, ignore the plain-text copy it regenerates locally.
+bed_template/altanalyze/refs/**/*.txt
+psi_template/altanalyze/refs/**/*.txt
 
 # --- bulk data / models (never in git) ---
 *.gguf
