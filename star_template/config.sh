@@ -81,6 +81,7 @@ WATCHDOG_INTERVAL_MIN=30          # how often the self-driving watchdog re-check
 MAX_STALL_PASSES=2                # consecutive no-progress passes before giving up (STALLED)
 ABSOLUTE_MAX_PASSES=960           # HARD backstop: STALL after this many watchdog passes no matter what
 MAX_WALL_HOURS=336                # HARD backstop: STALL after this many wall-clock hours (generous; ~14d)
+BACKSTOP_RESET_GAP_HOURS=12       # a gap this long since the last pass = a RE-ARMED chain -> new backstop window
 
 # 9b) RELIABILITY + CLEANUP (free disk as the pipeline progresses; cleanup defaults ON, set 0 to keep).
 DELETE_FASTQ_AFTER_BAM=1          # delete a sample's source FASTQ(s) once its BAM is published+verified

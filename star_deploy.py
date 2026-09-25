@@ -152,20 +152,8 @@ def _star_launch_sh(download_root, star_tag, check_min=30, max_wait_hours=336):
         "  fi\n"
         '  echo "[star_launch] run_star_pipeline.sh FAILED -> will retry in $CHECK_MIN min" >&2\n'
         "fi\n"
-        "# Bounded wait: only abort if we've waited past MAX_WAIT_HOURS AND the upstream watchdog.log is\n"
-        "# stale (no recent progress) -- so a long live download is never killed, but a DEAD chain stops.\n"
-        'STAMP="$HERE/.launch_first_seen"\n'
-        '[ -f "$STAMP" ] || date +%s > "$STAMP" 2>/dev/null\n'
-        'now=$(date +%s); first=$(cat "$STAMP" 2>/dev/null || echo "$now")\n'
-        'upwd="$DL_ROOT/watchdog.log"; up_age=999999999\n'
-        '[ -f "$upwd" ] && up_age=$(( now - $(stat -c %Y "$upwd" 2>/dev/null || echo "$now") ))\n'
-        'if [ "$(( now - first ))" -gt "$(( MAX_WAIT_HOURS * 3600 ))" ] && [ "$up_age" -gt "$(( CHECK_MIN * 180 ))" ]; then\n'
-        '  mkdir -p "$DL_ROOT/star" 2>/dev/null\n'
-        '  echo "STAR launcher gave up at $(date): download never finalized and its watchdog.log went stale (>${MAX_WAIT_HOURS}h)." \\\n'
-        '    > "$DL_ROOT/star/PIPELINE_LAUNCH_TIMEOUT.txt" 2>/dev/null\n'
-        '  echo "[star_launch] upstream dead -> giving up (PIPELINE_LAUNCH_TIMEOUT.txt written)" >&2; exit 0\n'
-        "fi\n"
-        "# download not done yet, OR a launch attempt just failed -> reschedule THIS launcher (+CHECK_MIN), then exit\n"
+        + cluster_deploy.launch_wait_sh("star_launch", f"{dl}/star", '"$DL_ROOT/watchdog.log"', "the download")
+        + "# download not done yet, OR a launch attempt just failed -> reschedule THIS launcher (+CHECK_MIN), then exit\n"
         "when=$(date -d \"+$CHECK_MIN min\" '+%Y:%m:%d:%H:%M' 2>/dev/null) || "
         "when=$(date -v+\"${CHECK_MIN}\"M '+%Y:%m:%d:%H:%M' 2>/dev/null)\n"
         'bsub -L /bin/bash -n 1 -M 1000 -W 66480 -b "$when" -J "${JT}_launch" \\\n'
@@ -315,9 +303,14 @@ def submit_star_over_ssh(P, cluster_cfg, secrets, download_root, reporter=NULL, 
         # START at STAR (download skipped): the launcher polls <download_root>/PIPELINE_COMPLETE.txt,
         # which no download will ever write -> pre-create it so STAR runs NOW on the FASTQs the user
         # already placed under <download_root>/by_study. Same remote shell, before the launcher bsub.
+        # GUARDED (same rule as bed/psi_deploy): only when no download ever ran in that folder (no marker AND no
+        # watchdog.log) -- touching a RUNNING download's marker makes its watchdog stop as "already finalized".
         _dr = download_root.rstrip("/")
-        launch = f"mkdir -p {shq(_dr)} && touch {shq(_dr + '/PIPELINE_COMPLETE.txt')}; " + launch
-        print(f"  STAR SUBMIT: download skipped -> pre-touch {_dr}/PIPELINE_COMPLETE.txt (no-wait start)")
+        _dm = _dr + "/PIPELINE_COMPLETE.txt"; _dl = _dr + "/watchdog.log"
+        launch = (f"if [ ! -f {shq(_dm)} ] && [ ! -f {shq(_dl)} ]; then mkdir -p {shq(_dr)} && "
+                  f"touch {shq(_dm)}; fi; " + launch)
+        print(f"  STAR SUBMIT: download skipped -> pre-touch {_dr}/PIPELINE_COMPLETE.txt ONLY if no download ran "
+              "there (else STAR waits for the running/finished download)")
     print(f"=== STAR SUBMIT: {user}@{host}:{port} -> {star_root} ===")
     try:
         if password:

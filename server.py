@@ -55,7 +55,9 @@ _RUN_DIR = None      # current/last run dir (download root)
 # On a non-loopback bind (--host 0.0.0.0 / a LAN IP) a random token is REQUIRED on every request: the
 # banner prints the URL with ?token=..., the served page embeds it, and /api/* verify it.
 _AUTH_TOKEN = ""     # "" => loopback bind, no token required
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}
+# NB: "0.0.0.0" / "::" are NOT loopback -- they bind EVERY interface (LAN-reachable), so they must get a token.
+# (0.0.0.0 used to be listed here, which silently served an unauthenticated control plane + API keys to the LAN.)
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
 def _host_of(value):
@@ -735,11 +737,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_readme(self):
-        """Render README.md as a minimal dark page (preformatted; no markdown deps)."""
-        try:
-            md = open(os.path.join(HERE, "README.md"), encoding="utf-8").read()
-        except Exception:
-            md = "README.md not found."
+        """Render the end-user guide (USER_GUIDE.md, else README.md) as a minimal dark page (preformatted; no
+        markdown deps). The footer link is labelled 'User Guide' and DEVELOPER_GUIDE documents USER_GUIDE.md as
+        the served guide -- it used to serve README.md."""
+        md = None
+        for name in ("USER_GUIDE.md", "README.md"):
+            try:
+                md = open(os.path.join(HERE, name), encoding="utf-8").read()
+                break
+            except Exception:
+                continue
+        if md is None:
+            md = "USER_GUIDE.md / README.md not found."
         html = ("<!DOCTYPE html><html><head><meta charset='utf-8'><title>SpliceScout — User Guide</title>"
                 "<style>body{background:#0f1420;color:#e7ecf5;font:14px/1.6 ui-monospace,Consolas,"
                 "monospace;max-width:920px;margin:0 auto;padding:32px 22px}a{color:#5fb6c0}"
@@ -2201,9 +2210,12 @@ function render(s){
   // log (append-aware autoscroll)
   const logEl=$('#log');
   const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
-  if((s.log||[]).length !== lastLogLen){
+  // redraw key = lines EVER logged (s.log_total). The buffer itself is capped at 600, so its LENGTH stops
+  // changing after 600 lines and the old length-based check froze the log for the rest of the run.
+  const logKey = (s.log_total != null) ? s.log_total : (s.log||[]).length;
+  if(logKey !== lastLogLen){
     logEl.innerHTML = (s.log||[]).map(l => '<span class="t">'+fmtDur(l.t).padStart(6,' ')+'</span>  '+esc(l.text)).join('\n');
-    lastLogLen = (s.log||[]).length;
+    lastLogLen = logKey;
     if(atBottom) logEl.scrollTop = logEl.scrollHeight;
   }
 
@@ -2786,8 +2798,15 @@ function renderClusterStatus(d, panelId){
       : p.stalled ? '⚠ AltAnalyze PSI stalled'
       : p.launch_pending ? 'AltAnalyze PSI queued — waiting for BAM&rarr;BED'
       : p.job_running ? 'AltAnalyze PSI running' : 'AltAnalyze PSI';
+    // comparisons written vs requested: a PSI run can have its per-sample table yet only SOME comparison files
+    // (a crashed/killed AltAnalyze) -- which silently limited concordance to the first few studies
+    const pc = (p.comparisons_requested!=null && p.comparisons_requested>0)
+      ? ' &middot; '+p.comparisons_written+' / '+p.comparisons_requested+' comparisons written'
+        + ((p.complete && !p.clean_exit && p.comparisons_written < p.comparisons_requested)
+           ? ' <b>(INCOMPLETE — AltAnalyze did not finish; concordance saw only part of the studies)</b>' : '')
+      : '';
     h += '<div class="banner '+(p.complete?'ok':(p.stalled?'err':'pick'))+'" style="margin-top:6px">'
-       + pphase + (p.live_jobs!=null?' &middot; '+p.live_jobs+' jobs':'') + '</div>';
+       + pphase + pc + (p.live_jobs!=null?' &middot; '+p.live_jobs+' jobs':'') + '</div>';
   }
   if(d.concordance){
     const c=d.concordance;

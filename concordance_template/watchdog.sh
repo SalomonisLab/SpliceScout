@@ -32,7 +32,8 @@ reschedule() {
   concord_qopt
   local _bopt=()
   [ -n "$when" ] && _bopt=(-b "$when")
-  out=$(bsub -L /bin/bash -n 1 -M 1000 -W 20 "${_bopt[@]+"${_bopt[@]}"}" -J "${JOB_TAG}_watchdog" \
+  # bounded, as in the download stage: a bsub blocked at the pending-job cap must not hang the pass
+  out=$(timeout "${WATCHDOG_SUBMIT_TIMEOUT:-120}" bsub -L /bin/bash -n 1 -M 1000 -W 20 "${_bopt[@]+"${_bopt[@]}"}" -J "${JOB_TAG}_watchdog" \
        -o "$LOG_DIR/watchdog.out" -e "$LOG_DIR/watchdog.err" \
        ${QOPT[@]+"${QOPT[@]}"} "$SCRIPTS_DIR/watchdog.sh" 2>&1)
   RESCHED_RC=$?
@@ -45,6 +46,7 @@ finalize() {                            # $1 = COMPLETE | STALLED
   local status="$1"
   local rep="$PIPELINE_ROOT/PIPELINE_${status}.txt"
   concord_finalize_once || { say "finalize already claimed by a concurrent pass -> skip"; return 0; }
+  rm -f "$STATE.firstpass" "$STATE.passes" "$STATE.lastpass" 2>/dev/null   # a later re-arm starts a fresh backstop window
   local _self _wj _bjout
   _self="${LSB_JOBID:-}"
   _bjout=$(timeout 60 bjobs -noheader -o jobid -J "${JOB_TAG}_watchdog" 2>/dev/null) || _bjout=""
@@ -99,6 +101,17 @@ reschedule                       # queue the NEXT pass FIRST (survives a mid-pas
 
 # ABSOLUTE BACKSTOP (bjobs-independent): cap by pass-count AND wall-clock.
 _now=$(date +%s)
+# A RE-ARMED chain gets a NEW window. The caps bound ONE continuous chain, but the window state survives a finalize,
+# so a stage re-armed later (a targeted re-run, a manual or AI re-arm) inherited its old firstpass and hit the wall
+# cap on its very first pass (the 2026-09-22 K562/A549 re-runs). A gap of BACKSTOP_RESET_GAP_HOURS since the last
+# pass means the chain had stopped -> start over. finalize() clears the window as well. (A state from before this
+# fix has no .lastpass: the .passes file's age stands in for it.)
+_lastp=$(cat "$STATE.lastpass" 2>/dev/null || stat -c %Y "$STATE.passes" 2>/dev/null || echo "$_now")
+if [ "$(( _now - _lastp ))" -ge "$(( ${BACKSTOP_RESET_GAP_HOURS:-12} * 3600 ))" ]; then
+  rm -f "$STATE.firstpass" "$STATE.passes"
+  say "backstop: last pass was $(( (_now - _lastp) / 3600 ))h ago -> re-armed chain, new pass/wall-clock window"
+fi
+echo "$_now" > "$STATE.lastpass"
 [ -f "$STATE.firstpass" ] || echo "$_now" > "$STATE.firstpass"
 _first=$(cat "$STATE.firstpass" 2>/dev/null || echo "$_now")
 _passes=$(( $(cat "$STATE.passes" 2>/dev/null || echo 0) + 1 )); echo "$_passes" > "$STATE.passes"

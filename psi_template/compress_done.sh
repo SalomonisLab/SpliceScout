@@ -6,6 +6,12 @@
 # COMPRESS_DIR, with gzip (pigz) or xz (LZMA2) per COMPRESS_WHEN_DONE.
 #   * SKIPS already-compressed files (*.gz/.bz2/.xz/.zst/.zip) and BAM/BAI/CRAM (already compressed
 #     binary -- re-compressing costs hours for ~no gain), and tiny control files (by size + name).
+#   * SKIPS .sra/.sralite/.vdbcache: SRA files are compressed internally, AND they are the download stage's
+#     INPUTS -- K562 (2026-08) had 4,081 downloaded-but-unconverted .sra gzipped to .sra.gz, which the download
+#     scripts no longer recognized as downloads.
+#   * SKIPS the pipeline's TOOLING and stage inputs (the AltAnalyze toolkit + exon reference, a STAR index, the
+#     run tables and sample / BAM / group lists): gzipping them broke every later re-run -- the BED stage needs the
+#     plain <SP>_Ensembl_exon.txt and STAR its SraRunTable_<line>.csv (A549 / K562, found 2026-09-22).
 #   * Does NOT follow symlinks (find -type f), so a symlinked BED dir is left alone.
 #   * Idempotent: a re-run only compresses what isn't compressed yet. Writes COMPRESSION_COMPLETE.txt.
 # =============================================================================
@@ -54,8 +60,12 @@ while IFS= read -r -d '' f; do
 done < <(find "$dir" -type f \
       ! -name '*.gz'  ! -name '*.bz2'  ! -name '*.xz'  ! -name '*.zst' ! -name '*.zip' \
       ! -name '*.bam' ! -name '*.bai'  ! -name '*.cram' ! -name '*.crai' ! -name '*.tbi' \
+      ! -name '*.sra' ! -name '*.sralite' ! -name '*.vdbcache' \
       ! -name '*.sh'  ! -name '*.log'  ! -name '*.out'  ! -name '*.err' ! -name '*.json' ! -name '*.lock' \
       ! -name 'PIPELINE_*.txt' ! -name 'COMPRESSION_*.txt' ! -name 'config.sh' \
+      ! -path '*/altanalyze/*' ! -path '*/altanalyze_home/*' ! -path '*/STAR-index/*' \
+      ! -name 'SraRunTable*' ! -name 'SraAccList*.txt' ! -name 'sample_list.tsv' ! -name 'bam_list.tsv' \
+      ! -name 'sample_groups.tsv' ! -name 'sample_comps.tsv' \
       -size +"${minmb}"M -print0 2>/dev/null)
 
 _report() {

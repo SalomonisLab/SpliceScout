@@ -60,13 +60,14 @@ while IFS=$'\t' read -r qname qdir ckind cpath || [ -n "${qname:-}" ]; do
     echo "[concord] atlas '$qname': query dir missing ($qdir) -> skip" >&2; continue
   fi
   mkdir -p "$resdir" || continue
-  # the scorer writes concordance.txt + overlaps-*-direction.txt into the REF dir (DRUG_SIG_DIR); clear stale first
-  rm -f "$DRUG_SIG_DIR"/concordance.txt "$DRUG_SIG_DIR"/overlaps-*-direction.txt 2>/dev/null || true
+  # the scorer writes concordance.txt + overlaps-*-direction.txt + pair_stats.tsv into the REF dir (DRUG_SIG_DIR);
+  # clear stale first
+  rm -f "$DRUG_SIG_DIR"/concordance.txt "$DRUG_SIG_DIR"/overlaps-*-direction.txt "$DRUG_SIG_DIR"/pair_stats.tsv 2>/dev/null || true
   echo "[concord] scoring atlas '$qname' (query=$qdir)"
   if python "$CONCORD_SCRIPT" --ref "$DRUG_SIG_DIR" --query "$qdir" \
        --rawp "$RAWP" --dPSI "$DPSI" ${IRFLAG[@]+"${IRFLAG[@]}"} > "$LOG_DIR/scorer_${qname}.log" 2>&1; then
     # move the scorer's outputs from the ref dir into this atlas's results dir
-    for of in concordance.txt overlaps-same-direction.txt overlaps-opposite-direction.txt; do
+    for of in concordance.txt overlaps-same-direction.txt overlaps-opposite-direction.txt pair_stats.tsv; do
       [ -f "$DRUG_SIG_DIR/$of" ] && mv -f "$DRUG_SIG_DIR/$of" "$resdir/$of" 2>/dev/null
     done
     if [ -s "$resdir/concordance.txt" ]; then
@@ -76,8 +77,12 @@ while IFS=$'\t' read -r qname qdir ckind cpath || [ -n "${qname:-}" ]; do
         tsv)          [ -s "${cpath:-}" ] && COPT=(--counts "$cpath") ;;
         mergedresult) [ -s "${cpath:-}" ] && COPT=(--mergedresult "$cpath") ;;
       esac
+      # pair_stats.tsv (beside concordance.txt) -> analytic-null significance; the tables are capped per drug and
+      # EVERY scored compound gets a line, so a few huge signatures can no longer hide the rest of the library
       python "$SCRIPTS_DIR/rank_concordance.py" --concordance "$resdir/concordance.txt" \
              --atlas "$qname" --threshold "$CONC_THRESHOLD" --out "$resdir/ranked_concordance_summary.txt" \
+             --min-overlap "${MIN_OVERLAP:-25}" --alpha "${FDR_ALPHA:-0.05}" --per-drug "${SUMMARY_ROWS_PER_DRUG:-3}" \
+             --psi-root "$PSI_ROOT" --concordance-root "$PIPELINE_ROOT" \
              ${COPT[@]+"${COPT[@]}"} >> "$LOG_DIR/scorer_${qname}.log" 2>&1 \
         || echo "[concord] ranker failed for '$qname' (concordance.txt still present)" >&2
       nscored=$((nscored+1))
@@ -91,6 +96,31 @@ while IFS=$'\t' read -r qname qdir ckind cpath || [ -n "${qname:-}" ]; do
 done < "$QUERIES_FILE"
 
 rm -f "$PIPELINE_ROOT/.force_rescore" 2>/dev/null || true
+
+# 4) ANALYTIC NULL across ALL atlases (manuscript Methods): Benjamini-Hochberg over every scored pair of every atlas
+#    -> scored_pairs_with_null.tsv (the manuscript figure scripts read it) + concordance_by_compound.tsv (one line per
+#    drug contrast). Optional agent-set enrichment (Mann-Whitney) when ENRICH_AGENTS is set, e.g. "indisulam,gsk591".
+_ps=()
+for _f in "$RESULTS_DIR"/*/pair_stats.tsv; do [ -s "$_f" ] && _ps+=("$_f"); done
+if [ "${#_ps[@]}" -gt 0 ] && [ -s "$SCRIPTS_DIR/score_with_null.py" ]; then
+  _EOPT=()
+  [ -n "${ENRICH_AGENTS:-}" ] && _EOPT=(--agents "$ENRICH_AGENTS" --enrichment-out "$RESULTS_DIR/mechanism_enrichment.tsv")
+  python "$SCRIPTS_DIR/score_with_null.py" --out "$RESULTS_DIR/scored_pairs_with_null.tsv" \
+         --by-compound "$RESULTS_DIR/concordance_by_compound.tsv" \
+         --complete "$RESULTS_DIR/complete_drug_by_subtype.tsv" \
+         --min-overlap "${MIN_OVERLAP:-25}" --alpha "${FDR_ALPHA:-0.05}" ${_EOPT[@]+"${_EOPT[@]}"} ${_ps[@]+"${_ps[@]}"} \
+         >> "$LOG_DIR/score_with_null.log" 2>&1 \
+    && echo "[concord] analytic null + BH across ${#_ps[@]} atlas(es) -> $RESULTS_DIR/scored_pairs_with_null.tsv" \
+    || echo "[concord] score_with_null failed (per-atlas summaries still present; see $LOG_DIR/score_with_null.log)" >&2
+fi
+
+# 5) STUDY COVERAGE across all atlases: which studies reached the ranking, and the step where each other study
+#    dropped out (PSI plan -> BED -> AltAnalyze-written comparisons -> study-matched gather -> scored).
+if [ -s "$SCRIPTS_DIR/study_coverage.py" ]; then
+  python "$SCRIPTS_DIR/study_coverage.py" --psi-root "$PSI_ROOT" --concordance-root "$PIPELINE_ROOT" \
+         --out "$RESULTS_DIR/study_coverage.tsv" > "$RESULTS_DIR/study_coverage.txt" 2>>"$LOG_DIR/study_coverage.log" \
+    && echo "[concord] study coverage -> $RESULTS_DIR/study_coverage.txt (+ .tsv)"
+fi
 
 if ! concord_done; then
   echo "[concord] no concordance.txt produced for any atlas -- not done (safe to resubmit)" >&2

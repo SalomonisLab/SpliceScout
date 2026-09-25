@@ -79,7 +79,8 @@
     },
     "lung": {
       "species": "Hs",
-      "label": "Lung (TCGA LUAD + LUSC OncoSplice subtypes)",
+      "label": "Lung (TCGA LUAD + LUSC OncoSplice subtypes; LUAD + LUSC tumor vs healthy lung)",
+      "_note": "LUAD/LUSC subtype dirs per Nathan Salomonis 2026-09-18. The two Tumor_vs_Healthy sets (TCGA-Lung/Korean_and_TCGA-Lung, 2024-05; one signature each, 1,208 / 1,853 junction clusters) were picked 2026-09-22 as his 'two more' lung sets -- same OncoSplice PSI format -- pending his confirmation.",
       "queries": [
         {
           "name": "LUAD",
@@ -89,9 +90,19 @@
         },
         {
           "name": "LUSC",
-          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Completed/LUSC/DE_splicing_events/Events-dPSI_0.1_adjp",
+          "query_dir": "/data/salomonis2/NCI-R01/ONCObrowser/Testing/LUSC/DE_splicing_events/Events-dPSI_0.1_adjp",
           "counts_kind": "mergedresult",
-          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Completed/LUSC/Oncosplice_clusters/MergedResult.txt"
+          "counts_file": "/data/salomonis2/NCI-R01/ONCObrowser/Testing/LUSC/Oncosplice_clusters/MergedResult.txt"
+        },
+        {
+          "name": "LUAD_Tumor_vs_Healthy",
+          "query_dir": "/data/salomonis2/NCI-R01/TCGA-Lung/Korean_and_TCGA-Lung/TCGA-LUAD/Oncosplice/Tumor_vs_Healthy/PSI/Events-dPSI_0.1_adjp",
+          "counts_kind": "none"
+        },
+        {
+          "name": "LUSC_Tumor_vs_Healthy",
+          "query_dir": "/data/salomonis2/NCI-R01/TCGA-Lung/Korean_and_TCGA-Lung/TCGA-LUSC/Oncosplice/Tumor_vs_Healthy/PSI/Events-dPSI_0.1_adjp",
+          "counts_kind": "none"
         }
       ]
     },
@@ -374,8 +385,14 @@
     "k562": {
       "species": "Hs",
       "cell_line_specific": true,
-      "label": "K562 (ENCODE RBP-perturbation splicing signatures, hg38)",
+      "label": "K562: AML/MDS OncoSplice subtypes (the disease reference for this leukemia line) + ENCODE RBP-perturbation signatures in K562 itself (which RBP a drug's splicing resembles)",
       "queries": [
+        {
+          "name": "AML",
+          "query_dir": "/data/salomonis2/NCI-R01/AML-OncoSplice",
+          "counts_kind": "tsv",
+          "counts_file": "aml_subtype_counts.tsv"
+        },
         {
           "name": "K562-ENCODE",
           "query_dir": "/data/salomonis2/NCI-R01/Signatures/hg38-signatures/K562/AltResults/AlternativeOutput/Events-dPSI_0.1_rawp",

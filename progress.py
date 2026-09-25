@@ -164,6 +164,7 @@ class RunReporter:
         self._t0 = time.monotonic()
         self._started_epoch = time.time()
         self._log = deque(maxlen=600)
+        self._log_total = 0            # lines EVER appended (monotonic) -- the UI redraw key; len(_log) caps at 600
         self._state = "running"        # running | done | error
         self._error = None
         self._result = None
@@ -264,6 +265,7 @@ class RunReporter:
             ts = time.time() - self._started_epoch
             for piece in line.split("\n"):
                 self._log.append({"t": round(ts, 1), "text": piece[:400]})
+                self._log_total += 1
             self._flush_locked()
 
     # ---- manual cell-line selection (deep dive) --------------------------
@@ -451,6 +453,7 @@ class RunReporter:
                 "result": self._result,
                 "files": self._files,
                 "log": list(self._log),
+                "log_total": self._log_total,
             }
 
     # ---- disk flush (best-effort, throttled) -----------------------------

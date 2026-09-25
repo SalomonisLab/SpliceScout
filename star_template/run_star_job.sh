@@ -229,7 +229,14 @@ if [ "${DELETE_FASTQ_AFTER_BAM:-1}" = "1" ]; then
       IFS=',' read -ra _fqs <<< "$_grp"
       for _fq in ${_fqs[@]+"${_fqs[@]}"}; do
         [ "$_fq" = "NA" ] && continue
-        [ -f "$_fq" ] && rm -f "$_fq" && echo "[star] $SAMPLE: deleted source FASTQ $_fq"
+        [ -f "$_fq" ] || continue
+        # FIRST leave <study>/<run>.aligned: the download stage counts the run as delivered by it, so a re-armed
+        # download (a re-run) never re-downloads a run whose reads are already in this BAM (K562/A549, 2026-09).
+        _run="$(basename "$_fq")"; _run="${_run%.gz}"; _run="${_run%.fastq}"; _run="${_run%.fq}"
+        _run="${_run%_R[12]}"; _run="${_run%_[0-9]}"
+        printf '%s\t%s\t%s\n' "$SAMPLE" "$BAM_OUT/$SAMPLE.bam" "$(date '+%Y-%m-%d %H:%M:%S')" \
+          > "$(dirname "$_fq")/$_run.aligned" 2>/dev/null
+        rm -f "$_fq" && echo "[star] $SAMPLE: deleted source FASTQ $_fq"
       done
     done
   fi

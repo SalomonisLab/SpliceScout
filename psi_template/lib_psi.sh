@@ -37,19 +37,90 @@ psi_job_is_live() { bjobs -noheader -o stat -J "$(psi_jobname)" 2>/dev/null | gr
 # EMPTY count (see lib_bed.sh) which would wedge the watchdog's integer gate.
 psi_done() {
   shopt -s nullglob
-  local a f
+  local a f table=0
   # require a NON-EMPTY table with >1 line (header + >=1 event), not mere existence: a truncated/header-only
   # EventAnnotation from a crashed/killed AltAnalyze run would otherwise count as DONE -> a false COMPLETE
   # (and the watchdog would never resubmit). (awk END{NR}, not grep -c -- reliable on compute nodes.)
   a=("$PSI_OUT"/AltResults/AlternativeOutput/*EventAnnotation*)
-  for f in "${a[@]}"; do
-    [ -s "$f" ] && [ "$(awk 'END{print NR+0}' "$f" 2>/dev/null)" -gt 1 ] && return 0
+  for f in ${a[@]+"${a[@]}"}; do
+    [ -s "$f" ] && [ "$(awk 'END{print NR+0}' "$f" 2>/dev/null)" -gt 1 ] && { table=1; break; }
   done
-  a=("$PSI_OUT"/AltResults/AlternativeOutput/*PSI*.txt)   # fallback: any non-trivial PSI table emitted
-  for f in "${a[@]}"; do
-    [ -s "$f" ] && [ "$(awk 'END{print NR+0}' "$f" 2>/dev/null)" -gt 1 ] && return 0
+  if [ "$table" = 0 ]; then
+    a=("$PSI_OUT"/AltResults/AlternativeOutput/*PSI*.txt)   # fallback: any non-trivial PSI table emitted
+    for f in ${a[@]+"${a[@]}"}; do
+      [ -s "$f" ] && [ "$(awk 'END{print NR+0}' "$f" 2>/dev/null)" -gt 1 ] && { table=1; break; }
+    done
+  fi
+  [ "$table" = 1 ] || return 1
+  # The per-sample table is written BEFORE the per-COMPARISON dPSI files (Events-dPSI_*/PSI.<cond>_vs_<ctrl>.txt,
+  # the only thing concordance scores). The table alone used to mean DONE, so an AltAnalyze run that crashed,
+  # was killed or froze part-way through the comparisons became COMPLETE with only the FIRST comparisons written
+  # (numbered in sorted-label = sorted-GSE order) -> concordance scored a handful of studies and silently dropped
+  # the rest; a resubmit even skipped the rerun for the same reason. Now: done = the table AND (AltAnalyze exited
+  # cleanly -- ALTANALYZE_OK.txt, written by run_psi_job.sh -- OR every requested comparison file exists).
+  local exp got
+  exp="$(psi_comparisons_expected)"
+  [ "${exp:-0}" -gt 0 ] || return 0                 # no comparisons requested -> the table is the deliverable
+  [ -f "$PIPELINE_ROOT/ALTANALYZE_OK.txt" ] && return 0
+  got="$(psi_comparisons_produced)"
+  [ "${got:-0}" -ge "$exp" ]
+}
+
+# Comparisons REQUESTED = non-blank lines of comps.<expname>.txt (pure bash; never grep -c on compute nodes).
+psi_comparisons_expected() {
+  local n=0 _l
+  [ -s "${COMPS_FILE:-}" ] || { echo 0; return 0; }
+  while IFS= read -r _l || [ -n "$_l" ]; do case "$_l" in (*[![:space:]]*) n=$((n+1)) ;; esac; done < "$COMPS_FILE"
+  echo "$n"
+}
+
+# Comparisons PRODUCED = distinct PSI.*_vs_*.txt[.gz] dPSI files under any Events-dPSI_* folder (the PSI stage's own
+# compression may have gzipped them).
+psi_comparisons_produced() {
+  shopt -s nullglob
+  local -A _seen
+  local n=0 f b
+  for f in "$PSI_OUT"/AltResults/AlternativeOutput/Events-dPSI_*/PSI.*_vs_*.txt \
+           "$PSI_OUT"/AltResults/AlternativeOutput/Events-dPSI_*/PSI.*_vs_*.txt.gz; do
+    b="${f##*/}"; b="${b%.gz}"
+    if [ -z "${_seen[$b]+x}" ]; then _seen[$b]=1; n=$((n+1)); fi
   done
-  return 1
+  echo "$n"
+}
+
+# Per-comparison report -> $PIPELINE_ROOT/PSI_COMPARISONS.tsv (requested comparison, expected dPSI file, produced?,
+# event rows). Echoes "<produced>/<requested>". Read by the concordance stage's per-study coverage section.
+psi_comparison_report() {
+  shopt -s nullglob
+  local out="$PIPELINE_ROOT/PSI_COMPARISONS.tsv" key gnum gname e b ne nb f cand n=0 got=0 rows
+  local -A _name
+  if [ -s "${GROUPS_FILE:-}" ]; then
+    while IFS=$'\t' read -r key gnum gname || [ -n "${key:-}" ]; do
+      [ -n "${gnum:-}" ] && _name[$gnum]="${gname:-group$gnum}"
+    done < "$GROUPS_FILE"
+  fi
+  printf 'exp_group\tbase_group\tdpsi_file\tproduced\tevent_rows\n' > "$out"
+  if [ -s "${COMPS_FILE:-}" ]; then
+    while IFS=$'\t' read -r e b || [ -n "${e:-}" ]; do
+      e="${e%$'\r'}"; b="${b%$'\r'}"
+      [ -n "${e:-}" ] && [ -n "${b:-}" ] || continue
+      ne="${_name[$e]:-$e}"; nb="${_name[$b]:-$b}"
+      n=$((n+1)); f=""
+      for cand in "$PSI_OUT"/AltResults/AlternativeOutput/Events-dPSI_*/"PSI.${ne}_vs_${nb}.txt" \
+                  "$PSI_OUT"/AltResults/AlternativeOutput/Events-dPSI_*/"PSI.${ne}_vs_${nb}.txt.gz"; do
+        f="$cand"; break
+      done
+      if [ -n "$f" ]; then
+        got=$((got+1))
+        case "$f" in *.gz) rows="$(gzip -dc "$f" 2>/dev/null | awk 'END{print NR-1}')" ;;
+                     *)    rows="$(awk 'END{print NR-1}' "$f" 2>/dev/null)" ;; esac
+        printf '%s\t%s\t%s\tyes\t%s\n' "$ne" "$nb" "${f##*/}" "${rows:-}" >> "$out"
+      else
+        printf '%s\t%s\tPSI.%s_vs_%s.txt\tNO\t\n' "$ne" "$nb" "$ne" "$nb" >> "$out"
+      fi
+    done < "$COMPS_FILE"
+  fi
+  echo "$got/$n"
 }
 
 # Count ${JOB_TAG}_job WORK-job names in a bjobs snapshot string ($1) with a PURE-BASH loop -- NOT
@@ -149,7 +220,12 @@ psi_check_beds() {
     # deadlocked the live A549 PSI for 14h. (exon bed, if any reached the bedDir, keeps the cheap last-line
     # check -- it is a different 10-col format and is excluded from the PSI input anyway.)
     psi_bed_scan_ok "$j" || ok=0
-    if [ "$ok" = "1" ] && [ -e "$BED_INPUT_DIR/${s}__intronJunction.bed" ]; then
+    # A ZERO-BYTE __intronJunction.bed is VALID: BAMtoExonBED's intron-retention pass is hard-gated and
+    # legitimately writes nothing for some libraries, and the BED stage accepts it (lib_bed.sh bed_intron_ok:
+    # "exists, empty OK"). psi_bed_scan_ok rejects empty files, so scanning it unconditionally quarantined
+    # perfectly good samples -- enough to drop small control groups below MIN_PER_GROUP and silently remove
+    # every comparison of that study. Only a NON-empty intron BED is scanned (a corrupt one still quarantines).
+    if [ "$ok" = "1" ] && [ -s "$BED_INPUT_DIR/${s}__intronJunction.bed" ]; then
       psi_bed_scan_ok "$BED_INPUT_DIR/${s}__intronJunction.bed" || ok=0
     fi
     if [ "$ok" = "1" ] && [ -e "$BED_INPUT_DIR/${s}__exon.bed" ]; then

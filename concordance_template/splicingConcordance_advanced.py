@@ -117,7 +117,12 @@ def compareEventLists(PSI_ref_dir,PSI_query_dir,minimumOverlap=10,dPSI=None,rawp
     ea1.write(string.join(groups_list_query,'\t')+'\n')
     ea2.write(string.join(groups_list_query,'\t')+'\n')
     ea3.write(string.join(groups_list_query,'\t')+'\n')
-    
+    ### SpliceScout: long-form per-pair counts for the ANALYTIC NULL (score_with_null.py). For every drug x subtype
+    ### pair with any shared event: n = |E| (same + opposite direction) and the inclusion counts of each signature
+    ### restricted to E (-> p_P, p_D -> pi0). concordance.txt above is unchanged (same numbers, same floor).
+    ps = open(folder+'/pair_stats.tsv','w')
+    ps.write('drug_signature\tsubtype_signature\tn_overlap\tsame\topposite\tdrug_inclusion\tsubtype_inclusion\n')
+
     comparison_db={}
     best_hits={}
     print len(event_db_query),len(event_db)
@@ -132,9 +137,17 @@ def compareEventLists(PSI_ref_dir,PSI_query_dir,minimumOverlap=10,dPSI=None,rawp
             events2 = event_db_query[comparison2]
             #print comparison2, len(events2), events2[:5];sys.exit()
             events3 = convertEvents(events2)
-            overlapping_events = list(set(events1).intersection(events2))                  
+            overlapping_events = list(set(events1).intersection(events2))
             overlap = len(overlapping_events)
-            inverse_overlap = len(set(events1).intersection(events3)) ### Get opposite events
+            opposite_events = set(events1).intersection(events3) ### drug-side (uid,dir) whose subtype dir is flipped
+            inverse_overlap = len(opposite_events) ### Get opposite events
+            if overlap+inverse_overlap > 0:
+                inc_same = len([1 for (u,d) in overlapping_events if d == 'inclusion'])
+                inc_opp = len([1 for (u,d) in opposite_events if d == 'inclusion'])
+                drug_inc = inc_same + inc_opp                             ### drug inclusion within E
+                sub_inc = inc_same + (inverse_overlap - inc_opp)          ### subtype inclusion within E
+                ps.write(string.join([comparison1, comparison2, str(overlap+inverse_overlap), str(overlap),
+                                      str(inverse_overlap), str(drug_inc), str(sub_inc)],'\t')+'\n')
             ### Calculate ratios based on the size of the smaller set
             min_events1 = min([len(events1),len(events2)]) 
             min_events2 = min([len(events1),len(events3)])
@@ -169,6 +182,7 @@ def compareEventLists(PSI_ref_dir,PSI_query_dir,minimumOverlap=10,dPSI=None,rawp
     ea1.close()
     ea2.close()
     ea3.close()
+    ps.close()
     #ea4.close()
     for comparison in best_hits:
         best_hits[comparison].sort()

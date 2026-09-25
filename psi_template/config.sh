@@ -46,10 +46,17 @@ EXPNAME="splicing"
 
 # 5) DIFFERENTIAL COMPARISON. groups.txt/comps.txt are BUILT cluster-side by
 #    build_groups.sh from sample_groups.tsv (shipped) intersected with the BEDs that
-#    are actually present. If no usable 2-group split exists, only the groupless PSI
-#    table is produced. RUN_GOELITE is honored only when a comparison runs.
+#    are actually present. AltAnalyze's RNASeq workflow CANNOT run groupless: with no usable
+#    2-group split run_psi_job.sh fails loudly (-> STALL with a clear cause). RUN_GOELITE is
+#    honored only when a comparison runs.
 RUN_GOELITE=0                     # 1 => --runGOElite yes (needs the GO-Elite DB + R module)
 GROUP_KEY_SUFFIX=".bed"           # how a sample is keyed in groups.txt (AltAnalyze: <sample>.bed)
+JUNCTION_PREVALENCE_TAU=0.01      # junction whitelist: keep a junction only if seen in >= round(tau*N) of the N
+                                  # libraries (manuscript: tau=1%; restores the annotated fraction on large pooled
+                                  # cohorts). 0 = off. A no-op below ~150 libraries (tau*N rounds to <= 1).
+PSI_GROUPED_BEDS_ONLY=1           # 1 = only BEDs of samples listed in sample_groups.tsv enter AltAnalyze's bedDir
+                                  # (the dPSI comparisons use nothing else); 0 = every BED. A gzipped BED
+                                  # (*.bed.gz, e.g. after COMPRESS_WHEN_DONE) is decompressed into a private copy.
 
 # 6) RESOURCES. AltAnalyze is ONE multi-process job (not per-sample).
 THREADS=4                         # -n (LSF slots; AltAnalyze --multiProcessing yes)
@@ -71,6 +78,7 @@ MAX_RESUBMITS=2                   # resubmit the single AltAnalyze job at most t
 IDLE_STALL_PASSES=3               # a RUN job whose cpu_used is frozen this many passes = DEADLOCKED -> kill+resubmit+email
 ABSOLUTE_MAX_PASSES=960           # HARD backstop: STALL after this many watchdog passes no matter what
 MAX_WALL_HOURS=336                # HARD backstop: STALL after this many wall-clock hours (~14d)
+BACKSTOP_RESET_GAP_HOURS=12       # a gap this long since the last pass = a RE-ARMED chain -> new backstop window
 CLEANUP_TOOLS_WHEN_DONE=0         # remove an UPLOADED altanalyze_home on COMPLETE (default OFF; never
                                   # touches a found-on-cluster ALTANALYZE_HOME)
 
@@ -127,7 +135,7 @@ psi_species_from_organism() {
 [ -n "$ALTANALYZE_DB" ]   || ALTANALYZE_DB="$ALTANALYZE_HOME/AltDatabase"
 
 export BED_INPUT_DIR PIPELINE_ROOT ALTANALYZE_HOME ALTANALYZE_DB ORGANISM SPECIES PSI_OUT EXPNAME \
-       RUN_GOELITE GROUP_KEY_SUFFIX THREADS MEM_MB WALL LSF_QUEUE JOB_TAG WATCHDOG_INTERVAL_MIN \
+       RUN_GOELITE GROUP_KEY_SUFFIX JUNCTION_PREVALENCE_TAU PSI_GROUPED_BEDS_ONLY THREADS MEM_MB WALL LSF_QUEUE JOB_TAG WATCHDOG_INTERVAL_MIN \
        MAX_RESUBMITS ABSOLUTE_MAX_PASSES MAX_WALL_HOURS CLEANUP_TOOLS_WHEN_DONE \
        PYTHON_MODULE SAMTOOLS_MODULE R_MODULE SCRIPTS_DIR LOG_DIR SAMPLE_GROUPS GROUPS_FILE COMPS_FILE \
        COMPRESS_WHEN_DONE COMPRESS_DIR COMPRESS_MIN_MB COMPRESS_THREADS

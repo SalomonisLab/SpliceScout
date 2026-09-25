@@ -67,6 +67,7 @@ WATCHDOG_INTERVAL_MIN=30          # how often the self-driving watchdog re-check
 MAX_STALL_PASSES=2                # consecutive no-progress passes before giving up (STALLED)
 ABSOLUTE_MAX_PASSES=960           # HARD backstop: STALL after this many watchdog passes no matter what
 MAX_WALL_HOURS=336                # HARD backstop: STALL after this many wall-clock hours (generous; ~14d)
+BACKSTOP_RESET_GAP_HOURS=12       # a gap this long since the last pass = a RE-ARMED chain -> new backstop window
 STRICT_BED_CHECK=1               # a "done" BED must be complete (trailing newline + parseable last row), not just non-empty
 CLEANUP_TOOLS_WHEN_DONE=1         # on COMPLETE, remove the uploaded tooling (AltAnalyze toolkit + 100MB ref, STAR bundle, download scripts); keeps BAMs + BED outputs
 DELETE_BAM_AFTER_BED=0            # delete each BAM once its BEDs are made+verified (frees the STAR_bams volume; default OFF)

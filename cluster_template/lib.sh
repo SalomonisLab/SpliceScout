@@ -73,8 +73,37 @@ sra_drop_acc() {                                                          # $1=a
   printf '%s\t%s\t%s\tafter %s attempts\t%s\n' \
     "$1" "$(basename "$2")" "$3" "$(sra_attempts "$1")" "$(date '+%Y-%m-%d %H:%M:%S')" >> "$DROPPED_LIST"
 }
+# Is run $2 of study dir $1 DELIVERED? = it has a .fastq.gz (single- or paired-end, ANCHORED so SRR123 can't hide
+# behind SRR1234), OR the STAR stage already aligned it and deleted its FASTQ to free disk -- run_star_job.sh leaves
+# <study>/<acc>.aligned beside the FASTQ it deletes. Without that marker, re-arming the download stage after STAR
+# (a re-run, a manual re-arm) counted every aligned run as missing and RE-DOWNLOADED it (K562/A549, 2026-09-22).
+sra_delivered() {
+  compgen -G "$1/$2.fastq.gz" >/dev/null 2>&1 || compgen -G "$1/${2}_[0-9].fastq.gz" >/dev/null 2>&1 || [ -e "$1/$2.aligned" ]
+}
+
 # Count dropped accessions with a PURE-BASH loop (NOT `ls|wc`/`grep -c` -> unreliable on compute nodes).
-sra_dropped_count() { local n=0 f; for f in "$ATTEMPTS_DIR"/*.dropped; do [ -e "$f" ] && n=$((n+1)); done; echo "$n"; }
+# Counts ONLY accessions a study's SraAccList.txt still lists AND that are not delivered: the completion gate is
+# done + dropped >= expected, so a drop marker of a run no list names any more (a list rebuilt for a re-run), or of
+# a run that was delivered after all (converted on a later attempt), would count twice and could finalize the stage
+# with runs still missing (the 2026-09-22 re-run kit had to move such markers aside by hand).
+sra_dropped_count() {
+  local n=0 f a L sdir
+  local -A _where=()
+  for L in "$STUDIES_DIR"/*/SraAccList.txt; do
+    [ -f "$L" ] || continue
+    sdir="$(dirname "$L")"
+    while IFS= read -r a || [ -n "$a" ]; do a="${a%$'\r'}"; [ -n "$a" ] && _where["$a"]="$sdir"; done < "$L"
+  done
+  for f in "$ATTEMPTS_DIR"/*.dropped; do
+    [ -e "$f" ] || continue
+    a="$(basename "$f" .dropped)"
+    sdir="${_where[$a]:-}"
+    [ -n "$sdir" ] || continue                 # no list names it any more -> not part of this run
+    sra_delivered "$sdir" "$a" && continue     # delivered after all -> already counted as done
+    n=$((n+1))
+  done
+  echo "$n"
+}
 
 # Submit a prefetch (download) job. Args: studydir  listfile  [dep_jobid]
 # Downloads every accession in <studydir>/<listfile> into <studydir>. Echoes job id.
@@ -152,7 +181,7 @@ sra_submit_convert_study() {
   printf '%s\n' "$_out" | sra_jobid
 }
 
-# Count accessions in a study that already have a .fastq.gz (single- or paired-end).
+# Count accessions in a study that are delivered (a .fastq.gz, or aligned by STAR -- see sra_delivered).
 # Anchored to SraAccList.txt when present (bounded by the list, immune to stale-NFS
 # directory over-counts on compute nodes); falls back to a file scan otherwise.
 sra_done_count() {  # arg: studydir
@@ -160,14 +189,12 @@ sra_done_count() {  # arg: studydir
   if [ -f "$sdir/SraAccList.txt" ]; then
     while read -r a; do
       a=$(echo "$a" | tr -d '\r'); [ -z "$a" ] && continue
-      if compgen -G "$sdir/$a.fastq.gz" >/dev/null 2>&1 || compgen -G "$sdir/${a}_[0-9].fastq.gz" >/dev/null 2>&1; then
-        n=$((n+1))
-      fi
+      sra_delivered "$sdir" "$a" && n=$((n+1))
     done < "$sdir/SraAccList.txt"
     echo "$n"
   else
-    ls "$sdir"/*.fastq.gz 2>/dev/null \
-      | sed 's#.*/##; s/_[0-9]\.fastq\.gz$//; s/\.fastq\.gz$//' | sort -u | wc -l
+    ls "$sdir"/*.fastq.gz "$sdir"/*.aligned 2>/dev/null \
+      | sed 's#.*/##; s/_[0-9]\.fastq\.gz$//; s/\.fastq\.gz$//; s/\.aligned$//' | sort -u | wc -l
   fi
 }
 

@@ -25,8 +25,8 @@ import asyncio
 
 from progress import NULL
 import llm_providers
-from normalize_v2 import is_control as nv_is_control, clean_compound
-from runtable_annotate import TREATMENT_COLS, _treatment_value
+from normalize_v2 import clean_compound
+from runtable_annotate import treatment_columns, pick_treatment, control_like
 from build_final import _safe_open
 from cellline_match import _slug
 
@@ -59,10 +59,11 @@ def _row_blob(row):
 def _fixed_assign(row, groups):
     """Deterministic group for one run, or '' if unresolved. First confident match wins (control first)."""
     blob = _row_blob(row).lower()
-    treat = _treatment_value(row, [c for c in TREATMENT_COLS if c in row])
+    # same column discovery + "control only if EVERY treatment value says control" rule as runtable_annotate
+    treat = pick_treatment(row, treatment_columns(list(row.keys())), lambda v: False)
     for g in groups:
         if g["control"]:
-            if treat and nv_is_control(treat):
+            if treat and control_like(treat):
                 return g["name"]
             c = clean_compound(treat) if treat else None   # vehicle/control -> clean_compound() is None
             if treat and c is None:

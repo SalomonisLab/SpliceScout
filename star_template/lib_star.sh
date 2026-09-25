@@ -179,7 +179,20 @@ star_drop_sample() {
   mkdir -p "$STAR_ATTEMPTS_DIR" 2>/dev/null; : > "$STAR_ATTEMPTS_DIR/$1.dropped"
   printf '%s\t%s\tafter %s attempts\t%s\n' "$1" "${2:-alignment}" "$(star_attempts "$1")" "$(date '+%Y-%m-%d %H:%M:%S')" >> "$STAR_DROPPED_LIST"
 }
-star_dropped_count() { local n=0 f; for f in "$STAR_ATTEMPTS_DIR"/*.dropped; do [ -e "$f" ] && n=$((n+1)); done; echo "$n"; }
+# Counts ONLY labels of the CURRENT sample list that have no valid BAM: the gate is done + dropped >= expected, so a
+# marker left by an earlier run (a list rebuilt for a re-run) or of a sample that aligned after all would count twice
+# and could finalize the stage with samples still unaligned (the 2026-09-22 re-run kit moved such markers by hand).
+star_dropped_count() {
+  local n=0 label rest
+  [ -f "$SAMPLE_LIST" ] || { echo 0; return; }
+  while IFS=$'\t' read -r label rest; do
+    [ -n "$label" ] || continue
+    [ -f "$STAR_ATTEMPTS_DIR/$label.dropped" ] || continue
+    star_bam_ok "$label" && continue
+    n=$((n+1))
+  done < "$SAMPLE_LIST"
+  echo "$n"
+}
 
 # Does at least one of a comma-list of FASTQ paths still exist on disk? Used by the watchdog to detect
 # that a sample's source reads were already deleted (DELETE_FASTQ_AFTER_BAM) -- a resubmit would be doomed,
@@ -226,7 +239,7 @@ star_nudge_watchdog() {
   [ "$nlive" -eq 1 ] || return 0
   star_qopt
   local DEPW=(); [ -n "${LSB_JOBID:-}" ] && DEPW=(-w "ended(${LSB_JOBID})")
-  bsub -L /bin/bash -n 1 -M 1000 -W 20 -J "${JOB_TAG}_watchdog" \
+  timeout "${WATCHDOG_SUBMIT_TIMEOUT:-120}" bsub -L /bin/bash -n 1 -M 1000 -W 20 -J "${JOB_TAG}_watchdog" \
        ${DEPW[@]+"${DEPW[@]}"} \
        -o "$LOG_DIR/watchdog.out" -e "$LOG_DIR/watchdog.err" \
        ${QOPT[@]+"${QOPT[@]}"} "$SCRIPTS_DIR/watchdog.sh" >/dev/null 2>&1

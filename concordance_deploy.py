@@ -40,8 +40,13 @@ CONCORDANCE_CONFIG_DEFAULTS = {
     "RAWP": "0.05",
     "DPSI": "0.1",
     "REMOVE_IR": "0",
-    "MIN_OVERLAP": 5,
-    "CONC_THRESHOLD": "0.3",
+    "MIN_OVERLAP": 25,           # significance-test floor (manuscript |E| >= 25); the scorer still scores N >= 5
+    "CONC_THRESHOLD": "0.3",     # legacy cut-point, only used when the scorer wrote no pair_stats.tsv
+    "FDR_ALPHA": "0.05",
+    "SUMMARY_ROWS_PER_DRUG": 3,
+    "ENRICH_AGENTS": "",
+    "STUDY_MATCHED_ONLY": 1,
+    "EXCLUDE_REAGENTS": 1,       # drop lab-reagent 'drug' arms (4sU, dox induction, dTAG, puromycin...) at gather
     "CANCER_ATLAS": "auto",
     "ORGANISM": "Homo sapiens",
     "SPECIES": "",
@@ -57,7 +62,8 @@ CONCORDANCE_CONFIG_DEFAULTS = {
     "MAX_WALL_HOURS": 336,
     "PYTHON_MODULE": "python/2.7.5",
 }
-CONCORDANCE_NUMERIC = {"MIN_OVERLAP", "THREADS", "MEM_MB", "WATCHDOG_INTERVAL_MIN", "MAX_RESUBMITS",
+CONCORDANCE_NUMERIC = {"MIN_OVERLAP", "SUMMARY_ROWS_PER_DRUG", "STUDY_MATCHED_ONLY", "EXCLUDE_REAGENTS",
+                       "THREADS", "MEM_MB", "WATCHDOG_INTERVAL_MIN", "MAX_RESUBMITS",
                        "ABSOLUTE_MAX_PASSES", "MAX_WALL_HOURS"}
 # concord_cfg keys that are NOT config.sh vars (deploy-time only) -- stripped before fill_config.
 _DEPLOY_ONLY = ("enabled", "cancer_atlas", "QUERY_DIRS")
@@ -273,19 +279,8 @@ def _concordance_launch_sh(psi_root, concord_root, concord_tag, check_min=30, ma
         "  fi\n"
         '  echo "[concord_launch] run_concordance_pipeline.sh FAILED -> will retry in $CHECK_MIN min" >&2\n'
         "fi\n"
-        "# Bounded wait: abort only if past MAX_WAIT_HOURS AND PSI's watchdog.log is stale (dead chain).\n"
-        'STAMP="$HERE/.launch_first_seen"\n'
-        '[ -f "$STAMP" ] || date +%s > "$STAMP" 2>/dev/null\n'
-        'now=$(date +%s); first=$(cat "$STAMP" 2>/dev/null || echo "$now")\n'
-        'upwd="$PSI_ROOT/watchdog.log"; up_age=999999999\n'
-        '[ -f "$upwd" ] && up_age=$(( now - $(stat -c %Y "$upwd" 2>/dev/null || echo "$now") ))\n'
-        'if [ "$(( now - first ))" -gt "$(( MAX_WAIT_HOURS * 3600 ))" ] && [ "$up_age" -gt "$(( CHECK_MIN * 180 ))" ]; then\n'
-        '  mkdir -p "$CONCORD_ROOT" 2>/dev/null\n'
-        '  echo "concordance launcher gave up at $(date): PSI never finalized and its watchdog.log went stale (>${MAX_WAIT_HOURS}h)." \\\n'
-        '    > "$CONCORD_ROOT/PIPELINE_LAUNCH_TIMEOUT.txt" 2>/dev/null\n'
-        '  echo "[concord_launch] upstream dead -> giving up (PIPELINE_LAUNCH_TIMEOUT.txt written)" >&2; exit 0\n'
-        "fi\n"
-        "when=$(date -d \"+$CHECK_MIN min\" '+%Y:%m:%d:%H:%M' 2>/dev/null) || "
+        + cluster_deploy.launch_wait_sh("concord_launch", cr, '"$PSI_ROOT/watchdog.log" "$PSI_ROOT/.launch_heartbeat"', "PSI")
+        + "when=$(date -d \"+$CHECK_MIN min\" '+%Y:%m:%d:%H:%M' 2>/dev/null) || "
         "when=$(date -v+\"${CHECK_MIN}\"M '+%Y:%m:%d:%H:%M' 2>/dev/null)\n"
         'bsub -L /bin/bash -n 1 -M 1000 -W 66480 -b "$when" -J "${JT}_launch" \\\n'
         '     -o "$CONCORD_ROOT/launch.out" -e "$CONCORD_ROOT/launch.err" \\\n'

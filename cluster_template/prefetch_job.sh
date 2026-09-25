@@ -12,6 +12,14 @@ sra_load_modules
 # Each accession lands in <SDIR>/<ACC>/<ACC>.sra (or .sralite). Non-zero exit on a
 # single failed accession is fine: the convert step runs on whatever downloaded
 # (ended() dependency) and the watchdog re-fetches anything still missing.
-# Bound the whole network call with a timeout so a hung connection can't pin the job for its full walltime;
-# on timeout prefetch exits non-zero, which is handled exactly like a failed accession (watchdog re-fetches).
-timeout "${PREFETCH_TIMEOUT_SEC:-7200}" prefetch -O "$SDIR" --option-file "$LIST"
+# The timeout bounds EACH accession, not the whole list: a hung connection then costs one run (re-fetched later)
+# instead of the study. One cap over the whole list killed every study with more than ~2 h of transfer partway
+# through on EVERY attempt -- K562 GSE127062 (1,522 runs) got 76 through per 2-h attempt until MAX_FAILS dropped
+# the rest. prefetch skips a run it already holds, so re-listing those costs nothing.
+rc=0
+while read -r acc; do
+  acc=$(echo "$acc" | tr -d '\r'); [ -z "$acc" ] && continue
+  # --max-size: prefetch refuses a run above its 20G default, so every deep run failed until it was DROPPED
+  timeout "${PREFETCH_TIMEOUT_SEC:-7200}" prefetch --max-size "${PREFETCH_MAX_SIZE:-500G}" -O "$SDIR" "$acc" || rc=1
+done < "$LIST"
+exit "$rc"

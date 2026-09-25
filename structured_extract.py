@@ -30,6 +30,31 @@ COMPOUND_TAGS = {
     "perturbagen", "stimulus", "stimulation", "treatment agent",
     "drug/compound", "compound treatment", "treatment compound",
 }
+# More tags whose VALUE names the agent, seen in the real A549 run table: 'treated' ('Treated with Montelukast
+# Sodium'), 'drugs_treated' ('5uM momelotinib and 1uM selumetinib'), 'treatment_description' ('1 h with 5 nM
+# Dexamethasone'). ('drug treated' is NOT here: 'drug_treated' is runtable_annotate's own output column.)
+COMPOUND_TAGS |= {"treated", "drugs treated", "treatment description"}
+
+# Numbered / generically-qualified variants of a treatment tag ("treatment 2", "treatment_1", "agent 2", "drug
+# treatment", "secondary treatment", "exposure"). The exact set missed them, so e.g. A549 GSE124636's
+# dexamethasone arms (tag 'treatment_2') were never read -> the whole study had no drug call. The qualifier must be
+# GENERIC: an agent-named tag ('tgf-beta_treatment', 'dox_treatment', 'ifn_treatment', 'infectious_agent') holds
+# values like 'yes' / 'no' / '1 ng/ml for 24 h' or virus strains, which are not agent names.
+_GENERIC_QUALIFIER = (r"(?:drugs?|chemicals?|compounds?|small molecules?|pharmacological|primary|secondary|first|"
+                      r"second|third|additional|combination|co)")
+_COMPOUND_TAG_RX = re.compile(r"^(?:" + _GENERIC_QUALIFIER + r"\s+)?(?:treatments?|drugs?|compounds?|agents?|"
+                              r"exposures?|perturbations?|inhibitors?|chemicals?)(?:\s*\d+)?$")
+
+
+def is_compound_tag(tag):
+    """True for an attribute tag that names the treatment AGENT: COMPOUND_TAGS plus numbered / generically
+    qualified variants (case-, underscore- and whitespace-insensitive). The single test for both the headline
+    compound count (here) and the per-run annotation (runtable_annotate.treatment_columns), so the two can never
+    disagree."""
+    t = " ".join(str(tag or "").replace("_", " ").lower().split())
+    return t in COMPOUND_TAGS or bool(_COMPOUND_TAG_RX.match(t))
+
+
 CELL_TAGS = {"cell line", "cell-line", "cell_line", "cellline", "cell line name",
              "cell_line_name"}
 SOURCE_TAGS = {"source_name", "source name", "tissue", "sample type",
@@ -184,7 +209,7 @@ def parse_samples(xml, study):
                 cell = vl
             if tg in SOURCE_TAGS and not source:
                 source = vl
-            if tg in COMPOUND_TAGS:
+            if is_compound_tag(tg):
                 treats.append(vl)
         spots_list = [int(s) for s in re.findall(r'spots="(\d+)"', p)]
         spots = spots_list[0] if spots_list else 0
@@ -370,8 +395,14 @@ def run(P, ncbi_key=None, cap=None, reporter=NULL, workers=8):
     with open(P.raw_json, "r", encoding="utf-8") as f:
         result = json.load(f)["result"]
     uids = result["uids"]
+    # FETCH keeps EVERY search id in "uids" but writes a record only for ids whose esummary succeeded (the
+    # rest go to missing_summaries.json) -> skip record-less ids instead of crashing the stage on KeyError.
+    missing = [u for u in uids if not isinstance(result.get(u), dict)]
+    if missing:
+        print(f"  EXTRACT: {len(missing)} study id(s) have no esummary record (failed during FETCH; see "
+              f"missing_summaries.json) -> skipped")
     # carry each study's Stage-1 esummary record (meta_item) so _study_meta reuses it instead of re-fetching
-    pairs = [(u, result[u].get("accession"), result.get(u)) for u in uids]
+    pairs = [(u, result[u].get("accession"), result[u]) for u in uids if isinstance(result.get(u), dict)]
     if cap:
         pairs = pairs[:cap]
 
