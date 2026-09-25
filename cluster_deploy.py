@@ -58,6 +58,43 @@ def shq(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
+def launch_wait_sh(who, marker_dir, upstream, what):
+    """Bash for the BOUNDED WAIT of a self-rescheduling stage launcher (star/bed/psi/concordance_launch.sh share it).
+    It gives up (PIPELINE_LAUNCH_TIMEOUT.txt in `marker_dir`) only once BOTH hold: MAX_WAIT_HOURS have passed since
+    this launcher first ran, AND the whole upstream chain has gone quiet for 3 check intervals.
+      * `upstream` = bash words (paths) whose mtime shows the chain is alive: every upstream stage's watchdog.log
+        and the .launch_heartbeat each upstream launcher touches on every pass while it waits. Before, only the
+        ADJACENT stage's log counted, so a stage that had not started yet (or the stale log of an earlier run)
+        looked dead while the download two stages up was busy -- a long download timed out the BED/PSI launchers.
+      * A heartbeat older than 12 h means this launcher is starting over (re-armed for a re-run): its first-seen
+        stamp is renewed, else the stamp of the earlier run timed it out on its first pass.
+    `who` = log prefix (e.g. 'bed_launch'); `what` = the upstream stage, for the timeout message."""
+    return (
+        "# Bounded wait: give up only after MAX_WAIT_HOURS AND once the whole upstream chain has gone quiet (a dead\n"
+        "# chain). Alive = the freshest of the upstream watchdog logs + the heartbeats of upstream launchers still\n"
+        "# waiting. A heartbeat of this launcher older than 12 h = re-armed (a re-run) -> the wait starts over.\n"
+        f"LMARK={shq(marker_dir)}\n"
+        'mkdir -p "$LMARK" 2>/dev/null\n'
+        'STAMP="$HERE/.launch_first_seen"; BEAT="$LMARK/.launch_heartbeat"\n'
+        "now=$(date +%s)\n"
+        '_beat=$(stat -c %Y "$BEAT" 2>/dev/null || echo 0)\n'
+        'if [ ! -f "$STAMP" ] || [ "$(( now - _beat ))" -gt 43200 ]; then echo "$now" > "$STAMP" 2>/dev/null; fi\n'
+        ': > "$BEAT" 2>/dev/null\n'
+        'first=$(cat "$STAMP" 2>/dev/null || echo "$now")\n'
+        "up_age=999999999\n"
+        f"for _up in {upstream}; do\n"
+        '  [ -e "$_up" ] || continue\n'
+        '  _a=$(( now - $(stat -c %Y "$_up" 2>/dev/null || echo 0) ))\n'
+        '  [ "$_a" -lt "$up_age" ] && up_age=$_a\n'
+        "done\n"
+        'if [ "$(( now - first ))" -gt "$(( MAX_WAIT_HOURS * 3600 ))" ] && [ "$up_age" -gt "$(( CHECK_MIN * 180 ))" ]; then\n'
+        f'  echo "{who} gave up at $(date): {what} never finalized and the upstream chain went quiet (waited >${{MAX_WAIT_HOURS}}h)." \\\n'
+        '    > "$LMARK/PIPELINE_LAUNCH_TIMEOUT.txt" 2>/dev/null\n'
+        f'  echo "[{who}] upstream dead -> giving up (PIPELINE_LAUNCH_TIMEOUT.txt written)" >&2; exit 0\n'
+        "fi\n"
+    )
+
+
 # ---------- config.sh generation ----------
 def _shval(name, value, numeric=NUMERIC, defaults=CONFIG_DEFAULTS):
     if name in numeric:
@@ -1004,10 +1041,15 @@ _PSI_STATUS_PROBE = r'''TAG=%TAG%; PR=%PR%
 echo "PSIROOT $PR"
 if [ -n "$PR" ]; then
   if ls "$PR"/output/AltResults/AlternativeOutput/*EventAnnotation* >/dev/null 2>&1; then echo "PSITABLE 1"; else echo "PSITABLE 0"; fi
+  # per-comparison dPSI files written vs requested (the per-sample table alone is NOT a finished run)
+  C=0; for f in "$PR"/output/ExpressionInput/comps.*.txt; do [ -s "$f" ] && C=$(grep -c . "$f"); done
+  P=0; for f in "$PR"/output/AltResults/AlternativeOutput/Events-dPSI_*/PSI.*_vs_*.txt*; do [ -e "$f" ] && P=$((P+1)); done
+  echo "PSICOMPS $P $C"
 fi
 echo "---META---"
 [ -n "$PR" ] && [ -f "$PR/PIPELINE_COMPLETE.txt" ] && echo COMPLETE
 [ -n "$PR" ] && [ -f "$PR/PIPELINE_STALLED.txt" ] && echo STALLED
+[ -n "$PR" ] && [ -f "$PR/ALTANALYZE_OK.txt" ] && echo CLEANEXIT
 [ -n "$PR" ] && [ -f "$PR/PIPELINE_INCOMPLETE_UPSTREAM.txt" ] && echo UPSTREAMPARTIAL
 [ -n "$PR" ] && [ -f "$PR/PIPELINE_ORPHANED.txt" ] && echo ORPHANED
 [ -n "$PR" ] && [ -f "$PR/PIPELINE_LAUNCH_TIMEOUT.txt" ] && echo LAUNCHTIMEOUT
@@ -1024,10 +1066,14 @@ def parse_psi_status(text):
     head, _, wd = text.partition("---WATCHDOG---")
     body, _, meta = head.partition("---META---")
     table = bool(re.search(r"(?m)^PSITABLE\s+1", body))
+    pc = re.search(r"(?m)^PSICOMPS\s+(\d+)\s+(\d+)", body)
     lm = re.search(r"(?m)^LIVE\s+(\d+)", meta)
     lp = re.search(r"(?m)^LAUNCHPEND\s+(\d+)", meta)
     jr = re.search(r"(?m)^JOBRUN\s+(\d+)", meta)
     return {"psi_table": table,
+            "comparisons_written": int(pc.group(1)) if pc else None,
+            "comparisons_requested": int(pc.group(2)) if pc else None,
+            "clean_exit": "CLEANEXIT" in meta,
             "live_jobs": int(lm.group(1)) if lm else None,
             "launch_pending": bool(lp and int(lp.group(1)) > 0),
             "job_running": bool(jr and int(jr.group(1)) > 0),

@@ -112,7 +112,19 @@ bed_drop_sample() {                                                           # 
   printf '%s\t%s\tafter %s attempts\t%s\n' "$1" "${2:-conversion}" "$(bed_attempts "$1")" "$(date '+%Y-%m-%d %H:%M:%S')" >> "$BED_DROPPED_LIST"
 }
 # Count dropped samples with a PURE-BASH loop (NOT ls|wc / grep -c -> unreliable on compute nodes).
-bed_dropped_count() { local n=0 f; for f in "$BED_ATTEMPTS_DIR"/*.dropped; do [ -e "$f" ] && n=$((n+1)); done; echo "$n"; }
+# Counts ONLY labels of the CURRENT BAM list whose BEDs are not done (see star_dropped_count): a marker of a sample
+# no list names any more, or of one converted after all, would count twice toward done + dropped >= expected.
+bed_dropped_count() {
+  local n=0 label rest
+  [ -f "$BAM_LIST" ] || { echo 0; return; }
+  while IFS=$'\t' read -r label rest; do
+    [ -n "$label" ] || continue
+    [ -f "$BED_ATTEMPTS_DIR/$label.dropped" ] || continue
+    bed_done "$label" && continue
+    n=$((n+1))
+  done < "$BAM_LIST"
+  echo "$n"
+}
 
 # Submit ONE BAM. Arg: label (= BAM basename without .bam). Echoes the LSF job id.
 bed_submit_sample() {

@@ -16,7 +16,16 @@ star_load_modules
 
 ORG="${1:-organism}"; IDX="$2"; FAURL="$3"; GTFURL="$4"; THR="${5:-${BUILD_THREADS:-16}}"; OH="${6:-100}"
 MARK="$IDX/.star_index_done"
-trap 'rmdir "${IDX%/}.buildlock" 2>/dev/null' EXIT   # release the cross-run build lock resolve_index.sh took
+# ONE EXIT trap for BOTH cleanups. (A second `trap … EXIT` further down used to REPLACE this one, so the
+# cross-run build lock was never released -> every later run saw the lock, assumed "claimed by another run",
+# submitted samples with no index dependency, and they all failed -> MELTDOWN.)
+WORK=""
+_buildidx_cleanup() {
+  [ -n "$WORK" ] && rm -rf "$WORK"
+  rmdir "${IDX%/}.buildlock" 2>/dev/null   # release the cross-run build lock resolve_index.sh took
+  return 0
+}
+trap _buildidx_cleanup EXIT
 
 command -v STAR >/dev/null 2>&1 || { echo "[buildidx] STAR not on PATH" >&2; exit 1; }
 if star_index_valid "$IDX"; then
@@ -28,8 +37,7 @@ fi
 WORKBASE="${SCRATCH:-$(dirname "$BAM_OUT")}"
 mkdir -p "$WORKBASE" "$IDX" || { echo "[buildidx] cannot mkdir workspace/index" >&2; exit 1; }
 WORK="$WORKBASE/staridx_$(star_org_slug "$ORG")_${LSB_JOBID:-$$}"
-mkdir -p "$WORK" || exit 1
-trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK" || exit 1          # removed by _buildidx_cleanup (EXIT trap above) together with the lock
 
 fetch() {                          # url -> echoes local uncompressed path
   local url="$1" gz out
@@ -51,6 +59,24 @@ fetch() {                          # url -> echoes local uncompressed path
 echo "[buildidx] $ORG: downloading reference FASTA + GTF"
 FA="$(fetch "$FAURL")" || exit 1
 GTF="$(fetch "$GTFURL")" || exit 1
+
+# Chromosome-NAMING guard: an Ensembl FASTA names chromosomes '1..22,X,Y,MT' while a GENCODE/UCSC GTF uses
+# 'chr1..chrM'. STAR silently drops GTF lines whose chromosome isn't in the FASTA, so a mismatched pair builds
+# an index with (almost) no annotated junctions -- or fails with "no valid exon lines". Detect the two styles
+# and rewrite the GTF to the FASTA's convention before genomeGenerate.
+fa_chr="$(awk 'substr($0,1,1)==">"{print substr($1,2); exit}' "$FA")"
+gtf_chr="$(awk '!/^#/{print $1; exit}' "$GTF")"
+case "$fa_chr" in chr*) fa_style=chr ;; *) fa_style=plain ;; esac
+case "$gtf_chr" in chr*) gtf_style=chr ;; *) gtf_style=plain ;; esac
+if [ -n "$fa_chr" ] && [ -n "$gtf_chr" ] && [ "$fa_style" != "$gtf_style" ]; then
+  echo "[buildidx] $ORG: chromosome naming differs (FASTA '$fa_chr' vs GTF '$gtf_chr') -> rewriting GTF to $fa_style style"
+  if [ "$fa_style" = plain ]; then
+    awk 'BEGIN{OFS=FS="\t"} /^#/{print;next} {sub(/^chr/,"",$1); if($1=="M")$1="MT"; print}' "$GTF" > "$GTF.fixed"
+  else
+    awk 'BEGIN{OFS=FS="\t"} /^#/{print;next} {if($1=="MT")$1="M"; $1="chr"$1; print}' "$GTF" > "$GTF.fixed"
+  fi
+  mv -f "$GTF.fixed" "$GTF" || { echo "[buildidx] could not rewrite GTF chromosome names" >&2; exit 1; }
+fi
 
 echo "[buildidx] $ORG: STAR genomeGenerate -> $IDX (threads=$THR, sjdbOverhang=$OH)"
 STAR --runMode genomeGenerate --runThreadN "$THR" \

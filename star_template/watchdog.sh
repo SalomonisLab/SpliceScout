@@ -36,7 +36,8 @@ reschedule() {
   # capture bsub's OWN exit status (not the pipeline-tail rc of star_jobid) so the safety-net can tell a
   # genuine submit FAILURE (re-arm) from a successful submit whose id just failed to parse (do NOT re-arm,
   # else two parallel watchdog chains). RESCHED_RC drives both decisions.
-  out=$(bsub -L /bin/bash -n 1 -M 1000 -W 20 -b "$when" -J "${JOB_TAG}_watchdog" \
+  # bounded, as in the download stage: a bsub blocked at the pending-job cap must not hang the pass
+  out=$(timeout "${WATCHDOG_SUBMIT_TIMEOUT:-120}" bsub -L /bin/bash -n 1 -M 1000 -W 20 -b "$when" -J "${JOB_TAG}_watchdog" \
        -o "$LOG_DIR/watchdog.out" -e "$LOG_DIR/watchdog.err" \
        ${QOPT[@]+"${QOPT[@]}"} "$SCRIPTS_DIR/watchdog.sh" 2>&1)
   RESCHED_RC=$?
@@ -50,6 +51,7 @@ finalize() {                            # $1 = COMPLETE | STALLED
   # EXACTLY-ONCE (T2.3): an atomic mkdir claim survives NFS flock degradation -- only the first racer
   # past this does the destructive cleanup + chain kick; a concurrent pass returns harmlessly.
   star_finalize_once || { say "finalize already claimed by a concurrent pass -> skip"; return 0; }
+  rm -f "$STATE.firstpass" "$STATE.passes" "$STATE.lastpass" 2>/dev/null   # a later re-arm starts a fresh backstop window
   # Cancel ALL queued/duplicate watchdog successors except THIS job -- a double-armed or nudged successor
   # would otherwise re-spawn the chain after we stop (T2.4/T6).
   local _self _wj
@@ -118,9 +120,19 @@ finalize() {                            # $1 = COMPLETE | STALLED
       # deep -- so a misconfigured/shallow BAM_OUT can't widen the rm target to a shared parent.
       if [ -n "${dlroot:-}" ] && [ "$dlroot" != "/" ] && [ -d "$dlroot/STAR_bams" ] \
          && [ "$(printf '%s' "$dlroot" | awk -F/ '{print NF-1}')" -ge 3 ]; then
-        rm -rf "$dlroot/by_study" 2>/dev/null
+        # by_study is removed ONLY once it holds no FASTQ at all. With DELETE_FASTQ_AFTER_BAM=1 every aligned
+        # sample's FASTQ is already gone, so what remains is the per-study scaffolding. Any FASTQ still here
+        # is either (a) the user's "keep FASTQ" choice (DELETE_FASTQ_AFTER_BAM=0) or (b) a sample that was
+        # never aligned (dropped / orphan mate / mixed layout) -- deleting it would destroy data nothing else
+        # holds. (Before, this rm ran unconditionally and silently overrode the GUI keep-FASTQ toggle.)
+        if [ -d "$dlroot/by_study" ] && [ -n "$(find "$dlroot/by_study" -type f \( -name '*.fastq.gz' \
+             -o -name '*.fq.gz' -o -name '*.fastq' -o -name '*.fq' \) -print -quit 2>/dev/null)" ]; then
+          say "cleanup: KEPT $dlroot/by_study -- FASTQ files remain (DELETE_FASTQ_AFTER_BAM=${DELETE_FASTQ_AFTER_BAM:-1}, or unaligned samples)"
+        else
+          rm -rf "$dlroot/by_study" 2>/dev/null
+        fi
         rm -f "$dlroot"/*.sh "$dlroot"/*.py 2>/dev/null
-        say "cleanup: removed by_study + download bundle scripts under $dlroot"
+        say "cleanup: removed download bundle scripts (+ by_study if it held no FASTQ) under $dlroot"
       else
         say "cleanup: SKIPPED -- dlroot '${dlroot:-}' failed the run-root safety guard (kept tools)"
       fi
@@ -159,6 +171,17 @@ reschedule                       # queue the NEXT pass FIRST (survives a mid-pas
 # STALL never fires, and an overloaded cluster can break bjobs every pass (skip-forever). Either way, cap
 # the run by pass-count AND wall-clock so it can never loop/skip silently with no human signal.
 _now=$(date +%s)
+# A RE-ARMED chain gets a NEW window. The caps bound ONE continuous chain, but the window state survives a finalize,
+# so a stage re-armed later (a targeted re-run, a manual or AI re-arm) inherited its old firstpass and hit the wall
+# cap on its very first pass (the 2026-09-22 K562/A549 re-runs). A gap of BACKSTOP_RESET_GAP_HOURS since the last
+# pass means the chain had stopped -> start over. finalize() clears the window as well. (A state from before this
+# fix has no .lastpass: the .passes file's age stands in for it.)
+_lastp=$(cat "$STATE.lastpass" 2>/dev/null || stat -c %Y "$STATE.passes" 2>/dev/null || echo "$_now")
+if [ "$(( _now - _lastp ))" -ge "$(( ${BACKSTOP_RESET_GAP_HOURS:-12} * 3600 ))" ]; then
+  rm -f "$STATE.firstpass" "$STATE.passes"
+  say "backstop: last pass was $(( (_now - _lastp) / 3600 ))h ago -> re-armed chain, new pass/wall-clock window"
+fi
+echo "$_now" > "$STATE.lastpass"
 [ -f "$STATE.firstpass" ] || echo "$_now" > "$STATE.firstpass"
 _first=$(cat "$STATE.firstpass" 2>/dev/null || echo "$_now")
 _passes=$(( $(cat "$STATE.passes" 2>/dev/null || echo 0) + 1 )); echo "$_passes" > "$STATE.passes"

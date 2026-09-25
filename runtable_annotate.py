@@ -13,15 +13,80 @@ import re
 import csv
 import json
 
-from normalize_v2 import clean_compound, is_control as nv_is_control
+from normalize_v2 import clean_compound, normalize_compound, is_control as nv_is_control, flatten_structured_treatment
 from build_final import _safe_open
 from cellline_match import _slug
 from progress import NULL
+from structured_extract import COMPOUND_TAGS, is_compound_tag
 
 # treatment-ish columns (run-table attribute tags), in priority order
 TREATMENT_COLS = ["treatment", "treatments", "agent", "agents", "compound", "compounds",
                   "drug", "drugs", "drug_treatment", "treated_with", "chemical",
                   "perturbation", "small_molecule", "inhibitor", "stimulus"]
+
+
+def _tagnorm(t):
+    """Attribute-tag key shared with structured_extract: case-/underscore-insensitive ('Drug_Treatment' ==
+    'drug treatment'). The run table keeps the depositor's tag with whitespace->'_' (runtable_build.clean_tag)."""
+    return " ".join(str(t or "").replace("_", " ").lower().split())
+
+
+_TREAT_PRIORITY = [_tagnorm(c) for c in TREATMENT_COLS]
+# 'drug_original' = the depositor's own `drug` attribute, preserved by run() before this stage writes its
+# canonical `drug` output column (see run()); it ranks where 'drug' does.
+ORIGINAL_DRUG_COL = "drug_original"
+_TREAT_TAGS = set(_TREAT_PRIORITY) | {_tagnorm(t) for t in COMPOUND_TAGS} | {_tagnorm(ORIGINAL_DRUG_COL)}
+
+
+def treatment_columns(header):
+    """Every treatment-like column of a run table, in priority order (TREATMENT_COLS order first, then the
+    rest). Matches the SAME tag set the headline compound count uses (structured_extract.COMPOUND_TAGS),
+    case-insensitively. It used to be an exact, case-sensitive match against a SHORTER list, so a compound
+    counted in the headline table from e.g. 'Treatment', 'chemical_compound', 'treatment_agent' or
+    'perturbagen' was invisible per run -> drug='' -> Undetermined -> silently dropped from PSI.
+    When 'drug_original' is present, 'drug' is this stage's canonical OUTPUT and is not an input.
+    Numbered / qualified variants ('treatment_2', 'exposure', 'drug treatment') come from the same
+    structured_extract.is_compound_tag test the headline count uses."""
+    cols = [c for c in header if _tagnorm(c) in _TREAT_TAGS or is_compound_tag(c)]
+    # 'drug' is this stage's own canonical OUTPUT once the table was annotated (drug_treated present) or the
+    # depositor's column was moved to drug_original -- re-annotating must not read its previous answer back in
+    if any(_tagnorm(c) in (_tagnorm(ORIGINAL_DRUG_COL), "drug treated") for c in header):
+        cols = [c for c in cols if _tagnorm(c) != "drug"]
+    rank = {t: i for i, t in enumerate(_TREAT_PRIORITY)}
+    rank[_tagnorm(ORIGINAL_DRUG_COL)] = rank.get("drug", len(rank))
+    return sorted(cols, key=lambda c: (rank.get(_tagnorm(c), len(rank)), header.index(c)))
+
+
+def pick_treatment(row, cols, drug_of):
+    """The treatment value for one run, considering ALL treatment-like columns (the headline count reads all
+    of them): (1) the first value that names a real drug; else (2) the first value that is NOT a control
+    (e.g. a non-drug perturbation), so a run is only called a control when every value says control; else
+    (3) the first value. It used to take only the first non-empty column, so 'treatment: 24h' +
+    'agent: erlotinib' never saw erlotinib. An ENCODE treatment record is read as its plain text
+    ('treatment_term_name: Bortezomib; ... duration: 12; duration_units: hour' -> 'Bortezomib 12 hour')."""
+    vals = [flatten_structured_treatment((row.get(c) or "").strip()) for c in cols]
+    vals = [v for v in vals if v]
+    if not vals:
+        return ""
+    for v in vals:
+        if drug_of(v):
+            return v
+    for v in vals:
+        if not control_like(v):
+            return v
+    return vals[0]
+
+
+def control_like(raw):
+    """Explicit vehicle/negative control -- on the raw string OR its dose/replicate-normalized core, the same
+    test clean_compound() uses ('DMSO_rep1', 'vehicle 0.1% rep 2' are controls; before, only the raw test ran,
+    so they fell through to Undetermined)."""
+    if not raw:
+        return False
+    if nv_is_control(raw):
+        return True
+    n = normalize_compound(raw)
+    return bool(n) and nv_is_control(n)
 
 DOSE = re.compile(r"(\d+(?:\.\d+)?)\s*(nM|µM|μM|uM|mM|ng/?mL|µg/?mL|μg/?mL|ug/?mL|mg/?mL|%|Gy)\b", re.I)
 
@@ -52,12 +117,44 @@ def _is_nondrug_input(token):
     return t in {"strt", "ercc", "erccspikein", "spikein", "input"} or bool(_NONDRUG_INPUT.fullmatch(t))
 
 
+# A LAB REAGENT, not a treatment: metabolic RNA labels, inducible-expression switches, degron tags, selection
+# antibiotics (same list as concordance_template/gather_signatures.sh EXCLUDE_REAGENTS). Whole tokens, so doxorubicin
+# etc. are untouched.
+_REAGENT_RE = re.compile(r"(?<![a-z0-9])(?:4-?thiouridine|4su|5-?eu|5-?ethynyluridine|bru|bromouridine|"
+                         r"5-?iododeoxyuridine|idu|edu|brdu|doxycycline|dox|tetracycline|dtag(?:-?\d+)?|dtagv-?1|"
+                         r"auxin|iaa|5-?ph-?iaa|shield-?1|puromycin|blasticidin|g418|geneticin|hygromycin|zeocin)"
+                         r"(?![a-z0-9])", re.I)
+
+
+# words that can sit next to a reagent without naming another agent (units, times, framing)
+_REAGENT_NOISE = {
+    "g", "mg", "ug", "µg", "μg", "ng", "pg", "l", "ml", "ul", "µl", "μl", "m", "mm", "um", "µm", "μm", "nm", "pm",
+    "microgram", "micrograms", "milligram", "milligrams", "nanogram", "nanograms", "micromolar", "nanomolar",
+    "millimolar", "molar", "unit", "units", "u", "h", "hr", "hrs", "hour", "hours", "min", "mins", "minute", "minutes",
+    "d", "day", "days", "wk", "wks", "week", "weeks", "x", "no", "without", "plus", "and", "with", "for", "at", "of",
+    "in", "induction", "induced", "inducible", "labeled", "labelled", "labeling", "labelling", "pulse", "chase",
+    "selection", "selected", "treated", "treatment", "treat", "exposure", "exposed", "added", "addition", "only",
+    "alone", "media", "medium"}
+
+
+def _is_reagent_only(value):
+    """True when a value names ONLY lab reagents (+ dose / time / framing words): 'Doxycycline_1ug_mL_5d', '4sU 8min',
+    'dTAG-7 1h'. Its splicing signature is the experimental system, so it is not a drug arm (K562 2026-09: these ranked
+    among the top 'AML reversers'). A drug in a reagent background ('Erlotinib + dox') keeps its drug."""
+    if not value or not _REAGENT_RE.search(value):
+        return False
+    words = re.findall(r"[a-zµμ]+", _REAGENT_RE.sub(" ", value).lower())
+    return all(w in _REAGENT_NOISE for w in words)
+
+
 def canon_drug(raw, compound_map):
     """Canonical generic drug name (AI map when present), or '' for controls / non-drugs."""
     c = clean_compound(raw)               # None for vehicle/control/empty
     if not c:
         return ""
     if _is_nondrug_input(c):              # RNA/DNA input or seq-method token -> not a drug (see _is_nondrug_input)
+        return ""
+    if _is_reagent_only(c):               # 4sU / dox induction / dTAG / puromycin selection -> not a drug
         return ""
     info = compound_map.get(c)
     if info is None:
@@ -77,9 +174,11 @@ def drug_treated_label(raw, drug, compound_map):
         return "Drug Treated"
     if not raw:
         return "Undetermined"
-    if nv_is_control(raw):
+    if control_like(raw):
         return "Not Drug Treated"
     c = clean_compound(raw)
+    if c and _is_reagent_only(c):
+        return "Not Drug Treated"     # a lab reagent (4sU label, dox induction, degron tag, selection antibiotic)
     info = compound_map.get(c) if c else None
     if info is not None and not info.get("is_drug", True):
         return "Not Drug Treated"     # known non-drug perturbation
@@ -234,6 +333,45 @@ def make_workbook(src_csv, out_xlsx, hdr=None, data=None):
     return out_xlsx
 
 
+# A study's NO-AGENT arm is often written as the agent NEGATED: 'no IFNγ' beside '24hr IFNg', 'without Lip-1 treatment'
+# beside '10μM Lip-1 treatment for 24h' (K562 GSE134173 / GSE205036). Read alone it is neither a control nor a drug, so
+# the study lost its baseline. It is the control ONLY when the negated agent is a drug arm of the SAME study -- 'no
+# serum', 'no dox', 'without IL-3' (deprivation / induction arms) stay what they were.
+_NEG_AGENT = re.compile(r"^\s*(?:no|without|w/o|minus|untreated\s+with|not\s+treated\s+with)\s+(.+?)"
+                        r"(?:[\s_-]+(?:treatment|treated|stimulation|stimulated|exposure|added|addition))?\s*$", re.I)
+_GREEK = str.maketrans({"α": "a", "β": "b", "γ": "g", "δ": "d", "κ": "k", "μ": "u", "µ": "u"})
+_STUDY_COLS = ("GSE_Series", "gse_series", "GSE", "SRA Study", "BioProject")
+
+
+def _agent_key(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower().translate(_GREEK))
+
+
+def _negated_agent_controls(rows, raws):
+    """Mark as the study's control every run whose treatment negates one of that study's drug arms (see _NEG_AGENT).
+    Sets is_control='yes', drug_treated='Not Drug Treated', drug=''. Returns how many runs changed."""
+    def study(r):
+        return next(((r.get(c) or "").strip() for c in _STUDY_COLS if (r.get(c) or "").strip()), "")
+    drugs = {}
+    for r, raw in zip(rows, raws):
+        if r.get("drug_treated") == "Drug Treated":
+            keys = drugs.setdefault(study(r), set())
+            for s in (r.get("drug", ""), clean_compound(raw) or ""):
+                k = _agent_key(s)
+                if k:
+                    keys.add(k)
+    n = 0
+    for r, raw in zip(rows, raws):
+        if r.get("drug_treated") == "Drug Treated" or r.get("is_control") == "yes":
+            continue
+        m = _NEG_AGENT.match(raw or "")
+        k = _agent_key(m.group(1)) if m else ""
+        if k and k in drugs.get(study(r), ()):
+            r["is_control"], r["drug_treated"], r["drug"] = "yes", "Not Drug Treated", ""
+            n += 1
+    return n
+
+
 def run(P, sel, reporter=NULL):
     """Annotate the filtered run table (drug/dose/is_control), write review + workbook."""
     slug = _slug(sel.get("canonical", "cellline"))
@@ -256,7 +394,16 @@ def run(P, sel, reporter=NULL):
     with open(src, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     base_cols = list(rows[0].keys()) if rows else []
-    cols_present = [c for c in TREATMENT_COLS if c in base_cols]
+    # PRESERVE a depositor `drug` attribute. This stage appends its own canonical `drug` column, which used to
+    # OVERWRITE a same-named SRA attribute (e.g. a screen whose ONLY treatment column is `drug`) -- destroying the
+    # raw text ('untreated', 'Bortezomib (Velcade)', '… 24h') that user-defined groups, control detection and
+    # timepoint parsing read downstream. First annotation only (no drug_treated column yet).
+    if "drug" in base_cols and ORIGINAL_DRUG_COL not in base_cols and "drug_treated" not in base_cols:
+        for r in rows:
+            r[ORIGINAL_DRUG_COL] = r.pop("drug", "")
+        base_cols = [(ORIGINAL_DRUG_COL if c == "drug" else c) for c in base_cols]
+    cols_present = treatment_columns(base_cols)
+    print(f"  ANNOTATE: treatment columns used = {cols_present or '(none -- every run will be Undetermined unless the AI title fallback classifies it)'}")
     extra = ("drug", "dose", "is_control", "drug_treated")
     fields = [c for c in base_cols if c not in extra] + list(extra)
 
@@ -298,15 +445,25 @@ def run(P, sel, reporter=NULL):
     # raw so the regex-heavy clean_compound/is_control/drug_treated_label run ONCE per distinct value, not per
     # run. Identical per-row assignment, counters, and review tallies — output unchanged.
     _ann, _rec = {}, set()
+    _drug_memo = {}
+    raws = []                          # the raw treatment per row (the negated-agent control pass below reads it)
+
+    def _drug_of(v):                   # memoized canon_drug for pick_treatment's per-column scan
+        d = _drug_memo.get(v)
+        if d is None:
+            d = _drug_memo[v] = canon_drug(v, compound_map)
+        return d
+
     for r in rows:
-        raw = _treatment_value(r, cols_present)
+        raw = pick_treatment(r, cols_present, _drug_of)
+        raws.append(raw)
         hit = _ann.get(raw)
         if hit is None:
-            drug = canon_drug(raw, compound_map)
+            drug = _drug_of(raw)
             dose = parse_dose(raw)
             # a real drug => not a control; else 'yes' only for explicit vehicle/negative controls
             # (a non-drug perturbation such as siRNA leaves drug='' but is_control='no').
-            ctrl = "yes" if (not drug and raw and nv_is_control(raw)) else "no"
+            ctrl = "yes" if (not drug and raw and control_like(raw)) else "no"
             dt = drug_treated_label(raw, drug, compound_map)   # 3-way Drug Treated/Not/Undetermined
             if dt == "Undetermined":                           # RECOVERY: re-test the noise-stripped core
                 rlabel, rdrug = recover_label(raw, compound_map, drug_names)
@@ -333,8 +490,17 @@ def run(P, sel, reporter=NULL):
                 dt = adt
                 recovered_ai += 1
         r["drug"], r["dose"], r["is_control"], r["drug_treated"] = drug, dose, ctrl, dt
+    n_neg = _negated_agent_controls(rows, raws)
+    for r, raw in zip(rows, raws):
+        ctrl, dt = r["is_control"], r["drug_treated"]
         counter[ctrl] = counter.get(ctrl, 0) + 1
         dt_counter[dt] = dt_counter.get(dt, 0) + 1
+        if ctrl == "yes" and raw in review and review[raw][2] != "yes":   # the review shows the final call
+            d0, dose0, _c, _dt, n0 = review[raw]
+            review[raw] = ("", dose0, "yes", "Not Drug Treated", n0)
+    if n_neg:
+        print(f"  ANNOTATE: {n_neg} run(s) negating one of their study's drug arms ('no IFNγ', 'without Lip-1') "
+              f"-> the study's control arm")
     _rec_total = recovered_noise + recovered_ai
     reporter.set_detail(f"{len(rows)} runs annotated"
                         + (f" ({_rec_total} recovered from Undetermined)" if _rec_total else ""))

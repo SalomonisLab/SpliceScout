@@ -40,6 +40,8 @@ THREADS=5               # threads per conversion (also the job's slot request).
 MEM_MB=32000            # memory (-M) per conversion job
 WALL="1108:00"          # -W per job (HH:MM) — normal-queue MAX (66480 min) so jobs never hit walltime
 PREFETCH_MEM_MB=132000  # memory (-M) per prefetch (download) job
+PREFETCH_MAX_SIZE="500G" # prefetch --max-size: its own default (20G) refuses every larger run, which then fails
+                        # MAX_FAILS times and is DROPPED; deep RNA-seq runs are often 20-60 GB
 
 # 6) AUTOMATION.
 WATCHDOG_INTERVAL_MIN=30   # how often the self-driving watchdog re-checks. The watchdog WALLTIME is
@@ -50,6 +52,7 @@ WATCHDOG_INTERVAL_MIN=30   # how often the self-driving watchdog re-checks. The 
                            # follows automatically. Keep >= 15.
 ABSOLUTE_MAX_PASSES=960    # HARD backstop: STALL after this many watchdog passes no matter what
 MAX_WALL_HOURS=336         # HARD backstop: STALL after this many wall-clock hours (generous; ~14 days)
+BACKSTOP_RESET_GAP_HOURS=12 # a gap this long since the last pass = a RE-ARMED chain -> new backstop window
 JOB_TAG="sra"              # short prefix that namespaces this project's LSF job
                            # names (set something unique if you run >1 project).
 ALERT_EMAIL=""             # baked at deploy from the PC settings -> cluster jobs email the user on error/milestone ('' = off)

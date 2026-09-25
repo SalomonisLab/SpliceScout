@@ -44,7 +44,8 @@ STAGE_DOCS = {
                 "canonicalize it to a standard generic name — expanding abbreviations "
                 "(5-FU → fluorouracil), stripping salts, converting trade → generic, sorting "
                 "combinations — and flags non-drugs (controls, siRNA/CRISPR, bare numbers). Forced "
-                "tool/function call, resumable per batch. Skipped on a skip-AI run.",
+                "tool/function call, resumable per batch: on a resume only batches holding strings "
+                "the model has not answered yet are sent. Skipped on a skip-AI run.",
         "inputs": "ai_work/compound_batches/",
         "outputs": "ai_work/compound_results/*.json  ({raw: {name, is_drug}})",
     },
@@ -203,8 +204,10 @@ STAGE_DOCS = {
                 "ALTANALYZE_HOME (default the lab install) with its species database, or uploads a local copy only "
                 "if none is found (an ALTANALYZE_DB path override is supported). Uploads the PSI bundle and queues a "
                 "launcher that WAITS for BAM->BED to finish (polls <BAM_OUT>/bed/PIPELINE_COMPLETE.txt), then runs "
-                "ONE AltAnalyze job over the whole BED dir -> a per-sample PSI table, plus a differential dPSI "
-                "comparison when a usable 2-group split exists (groupless otherwise). Non-fatal: the bundle stays "
+                "ONE AltAnalyze job over the whole BED dir -> a per-sample PSI table plus one dPSI comparison per "
+                "drug condition vs its OWN study's controls (AltAnalyze cannot run groupless, so at least one "
+                "study needs >= 2 recognized controls). For large cohorts a junction PREVALENCE filter first keeps "
+                "only junctions seen in >= 1% of libraries (JUNCTION_PREVALENCE_TAU). Non-fatal: the bundle stays "
                 "downloadable.",
         "inputs": "psi_bundle.zip, your SSH settings, AltAnalyze on the cluster, the running/finished BAM->BED stage",
         "outputs": "(remote) <psi_root>/output/AltResults PSI/dPSI tables; psi_submit.json",
@@ -225,10 +228,15 @@ STAGE_DOCS = {
         "what": "(Autonomous mode only) Resolves the AltAnalyze install carrying export/UI/unique (for the scorer's "
                 "PYTHONPATH; reuses what PSI resolved), uploads the concordance bundle, and queues a launcher that WAITS "
                 "for AltAnalyze PSI to finish (polls <psi_root>/PIPELINE_COMPLETE.txt), then gathers the per-drug PSI "
-                "signatures and scores each against every cancer atlas -> a ranked reversal-candidate summary per atlas "
-                "(concordance 1=mimics, 0=reverses; candidates below the threshold, ranked by overlapping events + "
-                "patient count). Skips cleanly when no atlas is configured for the cell line. Non-fatal.",
+                "signatures (CROSS-study contrasts quarantined: batch-dominated) and scores each against every cancer "
+                "atlas (concordance 1=mimics, 0=reverses). Each pair is tested against its own analytic null "
+                "(exact binomial, BH-FDR); the per-atlas summary lists significant reversal/mimic candidates (max 3 "
+                "subtypes per drug) and EVERY scored compound on its own line. Skips cleanly when no atlas is "
+                "configured for the cell line. Non-fatal.",
         "inputs": "concordance_bundle.zip, your SSH settings, the cancer atlas signatures on the cluster, the running/finished PSI stage",
-        "outputs": "(remote) <concord_root>/results/<atlas>/concordance.txt + ranked_concordance_summary.txt; concordance_submit.json",
+        "outputs": "(remote) <concord_root>/results/<atlas>/{concordance.txt, pair_stats.tsv, ranked_concordance_summary.txt, "
+                   "significant_pairs.tsv, all_scored_pairs.tsv} + results/complete_drug_by_subtype.tsv (every drug x "
+                   "subtype) + results/scored_pairs_with_null.tsv + results/concordance_by_compound.tsv; "
+                   "concordance_submit.json",
     },
 }

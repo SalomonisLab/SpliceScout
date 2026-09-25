@@ -51,6 +51,17 @@ def module_mode(module):
     return MODULES.get(module, MODULES[DEFAULT_MODULE])["mode"]
 
 
+_AI_NO_ANSWER = {"", "unknown", "unresolved", "n/a", "na", "none"}
+
+
+def _ai_cell(sm):
+    """The AI's cell_line for a sample-map entry, or None when the AI gave no usable answer ('Unknown' --
+    also the fill value for a dropped/salvaged batch). Lets callers fall back to the deterministic value
+    so an AI failure is never WORSE than running without AI."""
+    v = ((sm or {}).get("cell_line") or "").strip()
+    return None if v.lower() in _AI_NO_ANSWER else v
+
+
 def protocol_class(text):
     t = (text or "").lower()
     if re.search(r"drug-?seq|\bbrb-?seq\b|quant-?seq|cel-?seq|mars-?seq|\btag-?seq\b|"
@@ -158,8 +169,14 @@ def build(P, mode="", is_headline=False):
         raise RuntimeError(
             f"raw_json result missing 'uids' list: {P.raw_json} (produced by the FETCH stage) — "
             f"the file is malformed; re-run the FETCH stage")
+    n_missing = sum(1 for u in uids if not isinstance(result.get(u), dict))
+    if n_missing:
+        # FETCH lists every search id in "uids" but writes a record only when its esummary succeeded
+        print(f"  BUILD: {n_missing} study id(s) have no esummary record (failed during FETCH) -> skipped")
     for u in uids:
-        item = result[u]
+        item = result.get(u)
+        if not isinstance(item, dict):
+            continue
         gse = item.get("accession", "")
         for s in item.get("samples", []):
             gsm = s.get("accession", "")
@@ -171,15 +188,19 @@ def build(P, mode="", is_headline=False):
             cleaned_tag = clean_struct_cell(tag)
             if cleaned_tag:
                 sm = sample_map.get(tag)
-                if sm:
-                    cell, category = sm.get("cell_line") or cleaned_tag, sm.get("category") or "Cell line"
+                if sm and _ai_cell(sm):
+                    cell, category = _ai_cell(sm), sm.get("category") or "Cell line"
                 else:
+                    # no AI answer, OR the AI could not resolve it ("Unknown" -- also what a dropped/salvaged
+                    # batch is filled with): keep the depositor's own structured tag, exactly as skip-AI would.
+                    # (It used to adopt "Unknown", so an AI hiccup was WORSE than no AI: a real A549 tag fell
+                    # into the Unknown bucket and out of the deep dive.)
                     cell, category = cleaned_tag, "Cell line"
                 n_struct_cell += 1
             else:
                 sm = sample_map.get(title)
-                if sm and sm.get("cell_line"):
-                    cell, category = sm["cell_line"], sm.get("category") or "Cell line"
+                if sm and _ai_cell(sm):
+                    cell, category = _ai_cell(sm), sm.get("category") or "Cell line"
                     n_ai_cell += 1
                 else:
                     cell = extract_cell_line(title, gse)

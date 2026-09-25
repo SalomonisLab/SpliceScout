@@ -336,6 +336,54 @@ async def _process_unit(client, provider, spec, pass_name, items, model, max_tok
     return merged
 
 
+def _load_items(path):
+    """A batch's input strings, or None if the batch file is unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            items = json.load(f)
+    except Exception:
+        return None
+    return [it for it in items if isinstance(it, str)] if isinstance(items, list) else None
+
+
+def _load_result(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _resume_plan(batches, out_dir, prefix):
+    """Which batches still need the model -> (todo, n_rebuilt). A result counts only if it covers EVERY string now
+    in its batch. Batches are numbered, not content-addressed, so when PREP re-chunks a changed vocabulary (e.g.
+    after a normalize_v2 fix turned the key 'treated by' into 'mitoxantrone') a stale cmpd_005 result used to be
+    taken as done and the new strings never reached the model. A batch whose strings were ALL answered before (in
+    any earlier result file) is rebuilt from those answers without a model call; only batches holding new strings
+    are sent."""
+    prior = {}
+    for p in sorted(glob.glob(os.path.join(out_dir, f"{prefix}_*.json"))):
+        prior.update(_load_result(p))
+    todo, rebuilt = [], 0
+    for b in batches:
+        out_path = os.path.join(out_dir, os.path.basename(b))
+        items = _load_items(b)
+        if items is None:                                   # unreadable batch: the old existence-only rule
+            if not _result_ok(out_path):
+                todo.append(b)
+            continue
+        have = _load_result(out_path)
+        if have and all(it in have for it in items):
+            continue
+        if items and all(it in prior for it in items):
+            _atomic_write(out_path, {it: prior[it] for it in items})
+            rebuilt += 1
+            continue
+        todo.append(b)
+    return todo, rebuilt
+
+
 async def _run_pass_async(pass_name, P, cfg, reporter=NULL):
     spec = PASSES[pass_name]
     provider = llm_providers.normalize_provider(cfg.get("provider", "anthropic"))
@@ -345,10 +393,10 @@ async def _run_pass_async(pass_name, P, cfg, reporter=NULL):
     out_dir = os.path.join(P.work_dir, spec["out_dir"])
     os.makedirs(out_dir, exist_ok=True)
     batches = sorted(glob.glob(os.path.join(in_dir, f'{spec["prefix"]}_*.json')))
-    todo = [b for b in batches
-            if not _result_ok(os.path.join(out_dir, os.path.basename(b)))]
+    todo, rebuilt = _resume_plan(batches, out_dir, spec["prefix"])
     print(f"[AI:{pass_name}] {len(batches)} batches, {len(todo)} to do "
-          f"(provider={provider}, model={model}, concurrency={concurrency})")
+          + (f"({rebuilt} rebuilt from earlier answers after PREP re-chunked them) " if rebuilt else "")
+          + f"(provider={provider}, model={model}, concurrency={concurrency})")
     # progress: total = all batches; pre-credit any already-complete (resume)
     reporter.set_total(len(batches))
     if len(batches) - len(todo):

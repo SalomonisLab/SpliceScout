@@ -47,8 +47,19 @@ CONCORD_SCRIPT=""
 RAWP=0.05                         # keep query/ref events with rawp <= this
 DPSI=0.1                          # keep events with |dPSI| >= this
 REMOVE_IR=0                       # 1 => also pass --removeIR True (drop intron-retention events)
-MIN_OVERLAP=5                     # the scorer's hardcoded overlap floor (informational)
-CONC_THRESHOLD=0.3                # ranked summary: concordance < this = reversal candidate (desirable)
+MIN_OVERLAP=25                    # shared events a pair needs to be significance-tested (manuscript: |E| >= 25).
+                                  # The scorer itself scores every pair with >= 5 (all_scored_pairs.tsv lists them).
+CONC_THRESHOLD=0.3                # LEGACY cut-point: only used when pair_stats.tsv is absent (older scorer)
+FDR_ALPHA=0.05                    # analytic null: a pair is a candidate at Benjamini-Hochberg q < this
+SUMMARY_ROWS_PER_DRUG=3           # ranked summary shows at most this many subtypes per drug (every drug still listed)
+ENRICH_AGENTS=""                  # optional, e.g. "indisulam,gsk591": Mann-Whitney positioning of these agents per
+                                  # subtype -> results/mechanism_enrichment.tsv (the manuscript's Table 4)
+STUDY_MATCHED_ONLY=1              # 1 = quarantine CROSS-study contrasts (drug and control arms from different GSEs,
+                                  # or a MULTISTUDY pooled baseline) before scoring: they are batch-dominated
+                                  # (~5x larger signatures) and would monopolise the ranking. 0 = score them too.
+EXCLUDE_REAGENTS=1                # 1 = leave out contrasts whose 'drug' is a lab reagent (4sU/EdU labels, dox/tet
+                                  # induction, dTAG/auxin degrons, puromycin/G418 selection) -- they report the
+                                  # experimental system, not a drug. Moved to drug_signatures_reagents/. 0 = keep.
 
 # 5) Cancer atlas label (informational; the actual queries are in QUERIES_FILE, auto-selected by the deployer
 #    from the cell line, e.g. MDS-L -> AML/MDS, A549 -> lung LUAD+LUSC).
@@ -79,6 +90,7 @@ MAX_RESUBMITS=2                   # resubmit the single concordance job at most 
 IDLE_STALL_PASSES=3               # a RUN job whose cpu_used is frozen this many passes = DEADLOCKED -> kill+resubmit+email
 ABSOLUTE_MAX_PASSES=960           # HARD backstop: STALL after this many watchdog passes no matter what
 MAX_WALL_HOURS=336                # HARD backstop: STALL after this many wall-clock hours (~14d)
+BACKSTOP_RESET_GAP_HOURS=12       # a gap this long since the last pass = a RE-ARMED chain -> new backstop window
 
 # 9) SOFTWARE MODULE (the scorer + ranker run under python2 with AltAnalyze's modules on PYTHONPATH).
 PYTHON_MODULE="python/2.7.5"
@@ -117,7 +129,8 @@ concord_species_from_organism() {
 [ -n "$ALTANALYZE_HOME" ] || ALTANALYZE_HOME="$PSI_ROOT/altanalyze_home"
 
 export PSI_ROOT PSI_EVENTS_DIR PIPELINE_ROOT ALTANALYZE_HOME CONCORD_SCRIPT QUERIES_FILE \
-       RAWP DPSI REMOVE_IR MIN_OVERLAP CONC_THRESHOLD CANCER_ATLAS ORGANISM SPECIES EXPNAME \
+       RAWP DPSI REMOVE_IR MIN_OVERLAP CONC_THRESHOLD FDR_ALPHA SUMMARY_ROWS_PER_DRUG ENRICH_AGENTS \
+       STUDY_MATCHED_ONLY EXCLUDE_REAGENTS CANCER_ATLAS ORGANISM SPECIES EXPNAME \
        THREADS MEM_MB WALL LSF_QUEUE JOB_TAG WATCHDOG_INTERVAL_MIN MAX_RESUBMITS \
        ABSOLUTE_MAX_PASSES MAX_WALL_HOURS PYTHON_MODULE \
        SCRIPTS_DIR LOG_DIR DRUG_SIG_DIR RESULTS_DIR

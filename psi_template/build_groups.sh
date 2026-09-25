@@ -52,6 +52,35 @@ while IFS=$'\t' read -r bs gnum glabel || [ -n "${bs:-}" ]; do
   fi
 done < "$SAMPLE_GROUPS"
 
+# --- identifier-shape diagnostic -----------------------------------------------------------------
+# Silent killer: sample_groups.tsv keyed by BioSample (SAMN...) while the BEDs are named by run
+# accession (SRR...) gives a ZERO intersection and an opaque "only 0 group(s)" abort that looks like
+# a data problem rather than an id-format problem. Show BOTH id shapes so the cause is obvious.
+if [ "$present" -eq 0 ] || [ "$absent" -gt $((present * 3)) ]; then
+  _ex_grp=""
+  while IFS=$'	' read -r _a _b _c || [ -n "${_a:-}" ]; do
+    case "${_a:-}" in ''|'#'*) continue ;; esac
+    _ex_grp="$_a"; break
+  done < "$SAMPLE_GROUPS"
+  _ex_bed=""
+  for _f in "$BED_INPUT_DIR"/*__junction.bed; do
+    [ -e "$_f" ] || continue
+    _b="${_f##*/}"; _ex_bed="${_b%__junction.bed}"; break
+  done
+  echo "[psi] identifier check: $present matched, $absent unmatched" >&2
+  echo "[psi]   sample_groups.tsv id looks like : ${_ex_grp:-<none>}" >&2
+  echo "[psi]   BED filename id looks like      : ${_ex_bed:-<none>}" >&2
+  case "${_ex_grp:-}" in
+    SAM*)
+      case "${_ex_bed:-}" in
+        SRR*|ERR*|DRR*)
+          echo "[psi]   MISMATCH: groups are keyed by BioSample, BEDs by run accession." >&2
+          echo "[psi]   Fix: remap sample_groups.tsv to run accessions using the Run/BioSample" >&2
+          echo "[psi]   columns of the SRA run table before launching PSI." >&2 ;;
+      esac ;;
+  esac
+fi
+
 # distinct group numbers with >= MIN_PER_GROUP present members (pure-bash tally; no grep -c)
 ok_groups=""
 for g in $(sort -u "$counts" 2>/dev/null); do
@@ -116,3 +145,32 @@ fi
 ng=0; while IFS= read -r _l; do case "$_l" in (*[![:space:]]*) ng=$((ng+1)) ;; esac; done < "$GROUPS_FILE"
 nc=0; while IFS= read -r _l; do case "$_l" in (*[![:space:]]*) nc=$((nc+1)) ;; esac; done < "$COMPS_FILE"
 echo "[psi] groups.txt: $ng samples ; comps.txt: $nc comparison(s) ($absent shipped samples had no BED)"
+
+# --- attrition report ----------------------------------------------------------------------------
+# Cohorts shrink enormously between "aligned" and "compared", and the loss used to be invisible:
+# on one A549 run 6,363 aligned libraries became 1,913 compared samples across 140 of 397 studies,
+# with 286 viable groups (2,156 samples) never entering a comparison because no control arm was
+# paired with them. Write the funnel out every run so that shrinkage is a number, not a surprise.
+_ATT="$PIPELINE_ROOT/groups_attrition.tsv"
+{
+  printf 'step	samples	groups	note
+'
+  _shipped=0
+  while IFS= read -r _l; do case "$_l" in (*[![:space:]]*) _shipped=$((_shipped+1)) ;; esac; done < "$SAMPLE_GROUPS"
+  printf '1_shipped_in_sample_groups	%s		annotated treated/control arms
+' "$_shipped"
+  printf '2_bed_present	%s		%s shipped samples had no junction BED
+' "$present" "$absent"
+  printf '3_group_size_ge_%s		%s	groups meeting MIN_PER_GROUP
+' "$MIN_PER_GROUP" "$nok"
+  printf '4_written_to_groups_txt	%s		samples entering AltAnalyze
+' "$ng"
+  printf '5_comparisons		%s	a group is used ONLY if a comparison references it
+' "$nc"
+} > "$_ATT" 2>/dev/null
+echo "[psi] attrition funnel -> $_ATT" >&2
+if [ "$_shipped" -gt 0 ] && [ "$ng" -lt $((_shipped / 2)) ]; then
+  echo "[psi] NOTE: only $ng of $_shipped annotated samples entered the comparison set." >&2
+  echo "[psi] Most loss at this step is groups with no matched control arm, not bad data --" >&2
+  echo "[psi] see groups_attrition.tsv before concluding the cohort was small." >&2
+fi

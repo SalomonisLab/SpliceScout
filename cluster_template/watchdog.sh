@@ -93,6 +93,7 @@ finalize() {  # $1 = COMPLETE | STALLED
   local status="$1"
   # EXACTLY-ONCE (T2.3): atomic mkdir claim (NFS-safe) -- only the first racer runs cleanup + the STAR kick.
   sra_finalize_once || { say "finalize already claimed by a concurrent pass -> skip"; return 0; }
+  rm -f "$STATE.firstpass" "$STATE.passes" "$STATE.lastpass" 2>/dev/null   # a later re-arm starts a fresh backstop window
   # Done -> cancel ALL queued/duplicate watchdog successors except THIS job (a double-armed/nudged one
   # would re-spawn the chain). Best-effort.
   local _self _wj
@@ -120,7 +121,7 @@ finalize() {  # $1 = COMPLETE | STALLED
       for S in "$STUDIES_DIR"/*/; do
         [ -f "$S/SraAccList.txt" ] || continue
         while read -r acc; do acc=$(echo "$acc"|tr -d '\r'); [ -z "$acc" ] && continue
-          compgen -G "$S$acc.fastq.gz" >/dev/null 2>&1 || compgen -G "$S${acc}_[0-9].fastq.gz" >/dev/null 2>&1 || echo "  $(basename "$S")  $acc"
+          sra_delivered "${S%/}" "$acc" || echo "  $(basename "$S")  $acc"
         done < "$S/SraAccList.txt"
       done
     fi
@@ -165,6 +166,17 @@ fi
 # never finalize, and its passes are launcher-driven, not the self-driving chain the cap is meant to bound.)
 if [ "$HEAL_ONLY" != "1" ]; then
 _now=$(date +%s)
+# A RE-ARMED chain gets a NEW window. The caps bound ONE continuous chain, but the window state survives a finalize,
+# so a stage re-armed later (a targeted re-run, a manual or AI re-arm) inherited its old firstpass and hit the wall
+# cap on its very first pass (the 2026-09-22 K562/A549 re-runs). A gap of BACKSTOP_RESET_GAP_HOURS since the last
+# pass means the chain had stopped -> start over. finalize() clears the window as well. (A state from before this
+# fix has no .lastpass: the .passes file's age stands in for it.)
+_lastp=$(cat "$STATE.lastpass" 2>/dev/null || stat -c %Y "$STATE.passes" 2>/dev/null || echo "$_now")
+if [ "$(( _now - _lastp ))" -ge "$(( ${BACKSTOP_RESET_GAP_HOURS:-12} * 3600 ))" ]; then
+  rm -f "$STATE.firstpass" "$STATE.passes"
+  say "backstop: last pass was $(( (_now - _lastp) / 3600 ))h ago -> re-armed chain, new pass/wall-clock window"
+fi
+echo "$_now" > "$STATE.lastpass"
 [ -f "$STATE.firstpass" ] || echo "$_now" > "$STATE.firstpass"
 _first=$(cat "$STATE.firstpass" 2>/dev/null || echo "$_now")
 _passes=$(( $(cat "$STATE.passes" 2>/dev/null || echo 0) + 1 )); echo "$_passes" > "$STATE.passes"
@@ -198,31 +210,58 @@ LIVE_B="$(sra_snapshot)"; SRA_SNAPB_RC=$?
 [ "$SRA_SNAPB_RC" -ne 0 ] && LIVE_B=""
 
 # 1) resubmit orphaned / failed conversions
-resub=0
+resub=0; blocked=0
 for S in */; do
   sdir="$STUDIES_DIR/$(basename "$S")"
   # If the study's BULK converter (cs) is still queued/running it WILL convert these .sra -> skip per-accession
   # resubmission so we never double-convert. Essential while the launcher is still submitting (cs jobs sit
   # PENDING behind the flood for a long time); harmless on a normal pass (by then cs has run, so it's not live).
   sra_has_live "${JOB_TAG}_cs_$(basename "$S")" "$LIVE" && continue
+  # A download still sitting in its per-accession subdir (<acc>/<acc>.sra) is a DOWNLOADED run whose converter
+  # never flattened it (convert_study bails out early on a full queue). Flatten it here so the loop below
+  # submits its conversion. Before, only flat *.sra were seen: fetch_missing counted these as FAILED downloads,
+  # re-prefetched them (prefetch finds them valid and exits 0) and dropped them after MAX_FAILS -- K562
+  # (2026-07) dropped 4,081 fully downloaded runs this way.
+  for _n in "$sdir"/*/*.sra "$sdir"/*/*.sralite "$sdir"/*/*.sra.vdbcache; do
+    [ -e "$_n" ] || continue
+    _a="$(basename "$(dirname "$_n")")"
+    case "$_n" in
+      *.sralite) _t="$sdir/$_a.sra" ;;
+      *)         _t="$sdir/$(basename "$_n")" ;;
+    esac
+    # a flat copy of the same run already exists (both are complete prefetch outputs): drop the nested duplicate,
+    # else it would sit in <acc>/ forever and hold the "zero .sra left" completion gate open
+    if [ -e "$_t" ]; then rm -f "$_n"; else mv -n "$_n" "$_t" 2>/dev/null; fi
+    rmdir "$sdir/$_a" 2>/dev/null
+  done
   for sra in "$sdir"/*.sra; do
     [ -e "$sra" ] || continue
     acc=$(basename "$sra" .sra)
+    sra_is_dropped "$acc" && { rm -f "$sra" "$sdir/${acc}.sra.vdbcache"; continue; }   # already gave up on it
+    # a LIVE converter owns this accession -- never touch its source (checked BEFORE the converted test: a job
+    # that is mid-publish must not have its .sra deleted out from under it)
+    sra_has_live "${JOB_TAG}_fqd_${acc}" "$LIVE" && continue
+    [ -n "$LIVE_B" ] && sra_has_live "${JOB_TAG}_fqd_${acc}" "$LIVE_B" && continue   # 2nd-snapshot re-verify (T2.1): in-memory, NOT per-acc bjobs
+    # STAR already aligned this run (its FASTQ was deleted after the BAM, <acc>.aligned left) -> the .sra is redundant
+    [ -e "$sdir/$acc.aligned" ] && { rm -f "$sra" "$sdir/${acc}.sra.vdbcache"; continue; }
     # already converted? DROP the now-redundant source .sra. (The per-acc converter deletes it on
     # success, but the bulk convert_study path can leave it behind -> stranded .sra keep nsra>0 forever
     # -> the "zero .sra left" completion gate never passes -> a FALSE STALL despite all data present.)
-    if compgen -G "$sdir/$acc.fastq.gz" >/dev/null 2>&1 || compgen -G "$sdir/${acc}_[0-9].fastq.gz" >/dev/null 2>&1; then
+    # "Converted" = a final-named .fastq.gz exists AND no hidden .part temp is left over: fasterqdump_job.sh
+    # publishes via temp+rename, so a leftover temp means an INTERRUPTED publish (e.g. _1 landed, _2 did not)
+    # -> keep the .sra and let the conversion be resubmitted instead of deleting the only copy of _2.
+    if { compgen -G "$sdir/$acc.fastq.gz" >/dev/null 2>&1 || compgen -G "$sdir/${acc}_[0-9].fastq.gz" >/dev/null 2>&1; } \
+       && ! compgen -G "$sdir/.${acc}.fastq.gz.part.*" >/dev/null 2>&1 \
+       && ! compgen -G "$sdir/.${acc}_[0-9].fastq.gz.part.*" >/dev/null 2>&1; then
       rm -f "$sra" "$sdir/${acc}.sra.vdbcache"; continue
     fi
-    sra_is_dropped "$acc" && { rm -f "$sra" "$sdir/${acc}.sra.vdbcache"; continue; }   # already gave up on it
-    sra_has_live "${JOB_TAG}_fqd_${acc}" "$LIVE" && continue
-    [ -n "$LIVE_B" ] && sra_has_live "${JOB_TAG}_fqd_${acc}" "$LIVE_B" && continue   # 2nd-snapshot re-verify (T2.1): in-memory, NOT per-acc bjobs
-    # a stranded .sra with no .fastq.gz and no live converter = the last conversion FAILED -> count it,
-    # and DROP after MAX_FAILS so one un-convertible run can't keep the study from ever completing.
-    _n=$(sra_bump_attempt "$acc")
-    if [ "$_n" -gt "${MAX_FAILS:-3}" ]; then
+    # a stranded .sra with no .fastq.gz and no live converter = the last conversion FAILED (or never ran) ->
+    # DROP after MAX_FAILS real attempts so one un-convertible run can't keep the study from ever completing.
+    # An attempt counts only once bsub has TAKEN the job: counting before the submit let a full queue (bsub
+    # blocked -> 124) burn one attempt per pass on the same accession and drop it without a single try.
+    if [ "$(sra_attempts "$acc")" -ge "${MAX_FAILS:-3}" ]; then
       sra_drop_acc "$acc" "$sdir" conversion
-      say "DROPPED $acc after $((_n - 1)) failed conversions -> logged to dropped_accessions.txt"
+      say "DROPPED $acc after $(sra_attempts "$acc") failed conversions -> logged to dropped_accessions.txt"
       continue
     fi
     # FAIL-FAST: the helper returns 124 if it can't queue (full) -> STOP resubmitting THIS pass. Trying the
@@ -231,9 +270,10 @@ for S in */; do
     sra_submit_conversion "$acc" "$sdir" >/dev/null; _src=$?
     if [ "$_src" -eq 124 ]; then
       say "resubmit blocked (queue full) after $resub -> stopping resubmit this pass; next pass resumes"
+      blocked=1
       break 2
     fi
-    [ "$_src" -eq 0 ] && resub=$((resub+1))
+    [ "$_src" -eq 0 ] && { sra_bump_attempt "$acc" >/dev/null; resub=$((resub+1)); }
   done
 done
 [ "$resub" -gt 0 ] && say "resubmitted $resub orphaned/failed conversion(s)"
@@ -288,7 +328,12 @@ if [ "$(( total_done + dropped ))" -ge "$total_exp" ] && [ "$nsra" -eq 0 ] && [ 
 fi
 
 queued_new=0; printf '%s' "$miss_out" | grep -qE 'queued [1-9]' && queued_new=1
-if [ "$nlive" -eq 0 ] && [ "$resub" -eq 0 ] && [ "$queued_new" -eq 0 ]; then
+# a submit that BLOCKED on a full queue is pending work, not "no progress": the pending-job cap can be filled by the
+# user's OTHER runs (nlive = 0 here), and two such passes used to finalize STALLED with runs still to deliver. A
+# queue that never drains is still bounded by ABSOLUTE_MAX_PASSES / MAX_WALL_HOURS.
+printf '%s' "$miss_out" | grep -q 'submit blocked' && blocked=1
+[ "${blocked:-0}" = "1" ] && say "a submit blocked on the full queue this pass -> not counted toward a stall"
+if [ "$nlive" -eq 0 ] && [ "$resub" -eq 0 ] && [ "$queued_new" -eq 0 ] && [ "${blocked:-0}" = "0" ]; then
   prev=$(cat "$STATE" 2>/dev/null || echo -1)
   stall=0; [ "$total_done" = "$prev" ] && stall=$(( $(cat "$STATE.stall" 2>/dev/null || echo 0) + 1 ))
   echo "$total_done" > "$STATE"; echo "$stall" > "$STATE.stall"

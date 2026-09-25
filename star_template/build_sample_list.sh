@@ -29,6 +29,13 @@ rt=()
 rc=$?
 
 n=$(star_expected_count)
+# A TARGETED RE-RUN (rerun_submit.sh writes RERUN_TARGETED.txt) may legitimately find no new FASTQ -- every sample it
+# asked for was undeliverable. Then an EMPTY list is the answer: the stage completes at once and hands on to BED,
+# instead of failing the launch and leaving the chain to retry forever.
+if [ "$rc" -eq 0 ] && [ "$n" -eq 0 ] && [ -f "$PIPELINE_ROOT/RERUN_TARGETED.txt" ]; then
+  echo "targeted re-run: no new FASTQ under $FASTQ_INPUT_DIR -> empty sample list (nothing to align)"
+  exit 0
+fi
 if [ "$rc" -ne 0 ] || [ "$n" -eq 0 ]; then
   echo "ERROR: sample-list build failed or produced 0 rows." >&2
   echo "  check $FASTQ_INPUT_DIR and the .orphans/.unmapped/.mixed reports beside $SAMPLE_LIST" >&2

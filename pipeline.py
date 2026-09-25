@@ -175,7 +175,9 @@ def main():
     ap.add_argument("--no-deep-dive", action="store_true", help="skip the cell-line metadata deep dive")
     ap.add_argument("--start-stage", default="fetch",
                     help="phase range: first stage to run (a progress.STAGES key); earlier stages' outputs must already exist in the run dir")
-    ap.add_argument("--end-stage", default="bed_submit",
+    # default = the WHOLE chain, same as the UI/RunConfig (it was 'bed_submit', so a CLI run never reached PSI or
+    # concordance and a resume couldn't change that)
+    ap.add_argument("--end-stage", default="concordance_submit",
                     help="phase range: last stage to run; later stages are skipped")
     ap.add_argument("--module", default=None, help="analysis module (e.g. bulk_rna_seq) — drives filter + alignment")
     ap.add_argument("--star-genome-dir", default=None, help="prebuilt STAR genome index dir (bulk_rna_seq module)")
@@ -224,6 +226,13 @@ def main():
             cfg.disable_reasoning = True
         if a.module:
             cfg.module = a.module
+        # --concurrency was silently ignored on resume: the persisted value won, so a run created
+        # with concurrency 80 kept firing 80 parallel requests even when relaunched with 8. Against a
+        # local/self-hosted model that saturates the endpoint and the run DEADLOCKS with no error
+        # (observed: 17 h idle after 5 of 13 batches). Honour the flag when it is passed explicitly;
+        # `default=8` means we cannot compare against the default, so check argv.
+        if any(x == "--concurrency" or x.startswith("--concurrency=") for x in sys.argv[1:]):
+            cfg.concurrency = a.concurrency
         sc = _star_cfg_from_args(a)
         if sc:
             cfg.star_cfg = {**(cfg.star_cfg or {}), **sc}
@@ -259,7 +268,7 @@ def main():
                         skip_ai=a.skip_ai, deep_dive=not a.no_deep_dive, pick_mode=pick_mode,
                         cluster_mode=a.cluster_mode, cluster_cfg=_cluster_cfg_from_args(a),
                         star_cfg=_star_cfg_from_args(a),
-                        start_stage=(a.start_stage or "fetch"), end_stage=(a.end_stage or "bed_submit"))
+                        start_stage=(a.start_stage or "fetch"), end_stage=(a.end_stage or "concordance_submit"))
         json.dump(asdict(cfg), open(P.config, "w", encoding="utf-8"), indent=2)
 
     # provider API key into env (CLI: prompt if missing)
@@ -295,7 +304,22 @@ def _cluster_cfg_from_args(a):
     """Collect cluster/ssh settings from CLI args into a cluster_cfg dict (or None)."""
     c = {}
     if a.cluster_root:
-        c["PIPELINE_ROOT"] = a.cluster_root
+        # Git Bash / MSYS on Windows rewrites POSIX-looking arguments into Windows paths BEFORE
+        # python sees them: --cluster-root /data/salomonis-archive/... arrives as
+        # C:/Program Files/Git/data/salomonis-archive/... The run then builds a bundle pointing at a
+        # path that does not exist on the cluster, and fails only much later at upload time.
+        _cr = a.cluster_root
+        _m = re.search(r"^[A-Za-z]:[\\/].*?(/(?:data|home|scratch|gpfs|lustre|work)/.+)$",
+                       _cr.replace("\\", "/"))
+        if _m:
+            _fixed = _m.group(1)
+            print("  WARNING: --cluster-root looks MSYS-mangled by the shell:\n"
+                  "             got      %s\n"
+                  "             using    %s\n"
+                  "           Prefix the command with MSYS_NO_PATHCONV=1 to prevent this."
+                  % (_cr, _fixed))
+            _cr = _fixed
+        c["PIPELINE_ROOT"] = _cr
     if a.ssh_host:
         c["ssh_host"] = a.ssh_host
     if a.ssh_user:
@@ -913,7 +937,7 @@ def run_pipeline(cfg, P, reporter=NULL, select_fn=None, secrets=None, cluster_fi
 
     # Phase range: run only stages in [start_stage, end_stage]; everything outside is skipped.
     start_i = _idx(getattr(cfg, "start_stage", "fetch") or "fetch")
-    end_i = _idx(getattr(cfg, "end_stage", "bed_submit") or "bed_submit")
+    end_i = _idx(getattr(cfg, "end_stage", "concordance_submit") or "concordance_submit")
     if start_i < 0:
         start_i = 0
     if end_i < 0:
@@ -1149,7 +1173,11 @@ def run_pipeline(cfg, P, reporter=NULL, select_fn=None, secrets=None, cluster_fi
                 # upstream download actually went (submitted) OR was DELIBERATELY skipped by the phase range
                 # (then we pre-touch the sentinel). If the download submit was attempted in-range and
                 # FAILED, arming the launcher would poll forever -> skip STAR submit instead.
-                download_go = (not in_range("cluster_submit")) or bool((submit_res or {}).get("submitted"))
+                # RESUME: a download submitted in an EARLIER session is marked done in pipeline_state.json
+                # (mark() only runs on a real submit), and this session never re-ran it (submit_res None) ->
+                # that is a GO too; before, a resume could never arm STAR/BED/PSI/concordance afterwards.
+                download_go = ((not in_range("cluster_submit")) or bool((submit_res or {}).get("submitted"))
+                               or (submit_res is None and done("cluster_submit")))
                 if not bundle_ready:
                     reporter.skip_stage("star_submit")
                 elif not download_go:
@@ -1199,7 +1227,8 @@ def run_pipeline(cfg, P, reporter=NULL, select_fn=None, secrets=None, cluster_fi
                 # T5.1: arm the BED launcher only if STAR actually went (submitted) OR was deliberately
                 # phase-range skipped (then pre-touch the sentinel). A failed in-range STAR submit cascades
                 # the skip to BED rather than arming a launcher that polls forever.
-                star_go = (not in_range("star_submit")) or bool((star_submit_res or {}).get("submitted"))
+                star_go = ((not in_range("star_submit")) or bool((star_submit_res or {}).get("submitted"))
+                           or (star_submit_res is None and done("star_submit")))   # submitted in an earlier session
                 if not bed_ready:
                     reporter.skip_stage("bed_submit")
                 elif not star_go:
@@ -1253,7 +1282,8 @@ def run_pipeline(cfg, P, reporter=NULL, select_fn=None, secrets=None, cluster_fi
                 # phase-range skipped (then pre-touch the BED sentinel). A failed in-range BED submit
                 # cascades the skip to PSI rather than arming a launcher that polls forever.
                 _bed_res = locals().get("bed_submit_res")
-                bed_go = (not in_range("bed_submit")) or bool((_bed_res or {}).get("submitted"))
+                bed_go = ((not in_range("bed_submit")) or bool((_bed_res or {}).get("submitted"))
+                          or (_bed_res is None and done("bed_submit")))   # submitted in an earlier session
                 if not psi_ready:
                     reporter.skip_stage("psi_submit")
                 elif not bed_go:
@@ -1303,7 +1333,8 @@ def run_pipeline(cfg, P, reporter=NULL, select_fn=None, secrets=None, cluster_fi
                 # phase-range skipped (then pre-touch the PSI sentinel). A failed in-range PSI submit cascades
                 # the skip to concordance rather than arming a launcher that polls a sentinel that never appears.
                 _psi_res = locals().get("psi_submit_res")
-                psi_go = (not in_range("psi_submit")) or bool((_psi_res or {}).get("submitted"))
+                psi_go = ((not in_range("psi_submit")) or bool((_psi_res or {}).get("submitted"))
+                          or (_psi_res is None and done("psi_submit")))   # submitted in an earlier session
                 if not concordance_ready:
                     reporter.skip_stage("concordance_submit")
                 elif not psi_go:

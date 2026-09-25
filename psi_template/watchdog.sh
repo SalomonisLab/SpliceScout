@@ -35,7 +35,8 @@ reschedule() {
   # (empty -b is a hard bsub error that kills the chain) -- omit -b and let LSF dispatch ASAP.
   local _bopt=()
   [ -n "$when" ] && _bopt=(-b "$when")
-  out=$(bsub -L /bin/bash -n 1 -M 1000 -W 20 "${_bopt[@]+"${_bopt[@]}"}" -J "${JOB_TAG}_watchdog" \
+  # bounded, as in the download stage: a bsub blocked at the pending-job cap must not hang the pass
+  out=$(timeout "${WATCHDOG_SUBMIT_TIMEOUT:-120}" bsub -L /bin/bash -n 1 -M 1000 -W 20 "${_bopt[@]+"${_bopt[@]}"}" -J "${JOB_TAG}_watchdog" \
        -o "$LOG_DIR/watchdog.out" -e "$LOG_DIR/watchdog.err" \
        ${QOPT[@]+"${QOPT[@]}"} "$SCRIPTS_DIR/watchdog.sh" 2>&1)
   RESCHED_RC=$?
@@ -48,6 +49,7 @@ finalize() {                            # $1 = COMPLETE | STALLED
   local status="$1"
   local rep="$PIPELINE_ROOT/PIPELINE_${status}.txt"   # SEPARATE line (bash 4.2 + set -u)
   psi_finalize_once || { say "finalize already claimed by a concurrent pass -> skip"; return 0; }
+  rm -f "$STATE.firstpass" "$STATE.passes" "$STATE.lastpass" 2>/dev/null   # a later re-arm starts a fresh backstop window
   # cancel ALL queued watchdog successors except THIS job. GUARD bjobs with `timeout 60` so a hung/wedged
   # bjobs cannot block finalize; an empty result just means "nothing to cancel" (NOT "all done").
   local _self _wj _bjout
@@ -67,11 +69,11 @@ finalize() {                            # $1 = COMPLETE | STALLED
     echo "AltAnalyze splicing (PSI) stage $status at $(ts)"
     [ "$partial" = "1" ] && echo "*** PARTIAL: upstream BED incomplete and/or this stage STALLED ***"
     if psi_done; then echo "PSI table: PRESENT -> $PSI_OUT/AltResults/AlternativeOutput"
-    else echo "PSI table: MISSING (AltAnalyze did not produce output)"; fi
+    else echo "PSI table: MISSING or INCOMPLETE (no clean AltAnalyze exit and not every comparison written)"; fi
     if [ -s "$GROUPS_FILE" ] && [ -s "$COMPS_FILE" ]; then
-      echo "Comparison: $ng grouped samples ; comps -> $(tr '\n' ';' < "$COMPS_FILE")"
+      echo "Comparisons: $(psi_comparisons_produced) of $(psi_comparisons_expected) requested dPSI files written ($ng grouped samples); per-comparison detail: $PIPELINE_ROOT/PSI_COMPARISONS.tsv"
     else
-      echo "Comparison: groupless (per-sample PSI only -- no usable 2-group split)"
+      echo "Comparisons: NONE (no usable 2-group split -- AltAnalyze's RNASeq workflow cannot run groupless)"
     fi
     echo "BED input: $BED_INPUT_DIR"
     if [ "$status" = "STALLED" ]; then
@@ -130,6 +132,17 @@ reschedule                       # queue the NEXT pass FIRST (survives a mid-pas
 # ABSOLUTE BACKSTOP (bjobs-independent): cap by pass-count AND wall-clock so a permanently-PENDING job or a
 # persistently-broken bjobs can never loop forever with no human signal.
 _now=$(date +%s)
+# A RE-ARMED chain gets a NEW window. The caps bound ONE continuous chain, but the window state survives a finalize,
+# so a stage re-armed later (a targeted re-run, a manual or AI re-arm) inherited its old firstpass and hit the wall
+# cap on its very first pass (the 2026-09-22 K562/A549 re-runs). A gap of BACKSTOP_RESET_GAP_HOURS since the last
+# pass means the chain had stopped -> start over. finalize() clears the window as well. (A state from before this
+# fix has no .lastpass: the .passes file's age stands in for it.)
+_lastp=$(cat "$STATE.lastpass" 2>/dev/null || stat -c %Y "$STATE.passes" 2>/dev/null || echo "$_now")
+if [ "$(( _now - _lastp ))" -ge "$(( ${BACKSTOP_RESET_GAP_HOURS:-12} * 3600 ))" ]; then
+  rm -f "$STATE.firstpass" "$STATE.passes"
+  say "backstop: last pass was $(( (_now - _lastp) / 3600 ))h ago -> re-armed chain, new pass/wall-clock window"
+fi
+echo "$_now" > "$STATE.lastpass"
 [ -f "$STATE.firstpass" ] || echo "$_now" > "$STATE.firstpass"
 _first=$(cat "$STATE.firstpass" 2>/dev/null || echo "$_now")
 _passes=$(( $(cat "$STATE.passes" 2>/dev/null || echo 0) + 1 )); echo "$_passes" > "$STATE.passes"
@@ -215,6 +228,31 @@ if [ "$done" -eq 0 ] && [ "$nlive" -ge 1 ]; then
     fi
   else
     echo 0 > "$STATE.idle"   # PEND/UNKNOWN -> not a freeze; reset the idle counter
+  fi
+fi
+
+# 2c) every requested comparison is WRITTEN but the job is still RUN and FROZEN -- stuck in a post-analysis tail
+# (e.g. a visualization step blocking on a dead web service, which ate the end of a 107 h run). The analysis is
+# complete, so KILL it (no resubmit): the next pass sees nlive==0 and finalizes COMPLETE instead of waiting weeks.
+if [ "$done" -eq 1 ] && [ "$nlive" -ge 1 ]; then
+  _ji=$(timeout 30 bjobs -noheader -o 'stat cpu_used' -J "${JOB_TAG}_job" 2>/dev/null | head -1)
+  _jstat=$(printf '%s' "$_ji" | awk '{print $1}')
+  _cpu=$(printf '%s' "$_ji" | awk '{print $2}')
+  if [ "$_jstat" = "RUN" ] && [ -n "$_cpu" ]; then
+    if [ "$_cpu" = "$(cat "$STATE.cpu" 2>/dev/null || echo '')" ]; then
+      _idle=$(( $(cat "$STATE.idle" 2>/dev/null || echo 0) + 1 ))
+    else
+      _idle=0
+    fi
+    echo "$_idle" > "$STATE.idle"; echo "$_cpu" > "$STATE.cpu"
+    say "liveness (outputs complete): job RUN cpu_used='$_cpu' idle_passes=$_idle/${IDLE_STALL_PASSES:-3}"
+    if [ "$_idle" -ge "${IDLE_STALL_PASSES:-3}" ]; then
+      say "all $(psi_comparisons_expected) comparisons written but the job is FROZEN -> killing its post-analysis tail"
+      for _j in $(timeout 30 bjobs -noheader -o jobid -J "${JOB_TAG}_job" 2>/dev/null); do bkill "$_j" >/dev/null 2>&1; done
+      echo 0 > "$STATE.idle"; rm -f "$STATE.cpu" 2>/dev/null
+    fi
+  else
+    echo 0 > "$STATE.idle"
   fi
 fi
 

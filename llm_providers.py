@@ -40,10 +40,43 @@ OLLAMA_OPENAI_BASE = "http://localhost:11434/v1"
 #                       line "disable reasoning" was a silent no-op for gpt-oss);
 #   thinking         -> Anthropic-style hosts;
 #   enable_thinking  -> MiMo / self-hosted vLLM (--reasoning-parser) chat-template hosts.
-# Unknown fields are dropped by LiteLLM/most proxies; a host that hard-400s makes the caller revert.
+# Unknown fields are dropped by LiteLLM/most proxies; a host that hard-400s is retried WITHOUT the body and
+# remembered (see _create_with_reasoning_fallback below).
 NO_REASONING_BODY = {"reasoning_effort": "low",
                      "thinking": {"type": "disabled"},
                      "chat_template_kwargs": {"enable_thinking": False}}
+
+# (base_url, model) endpoints that REJECTED the body above (HTTP 400/422 -- e.g. api.openai.com or Gemini's
+# OpenAI-compat endpoint refusing the unknown `thinking` / `chat_template_kwargs` fields, or a non-reasoning
+# model refusing `reasoning_effort`). The compounds pass ALWAYS asks for reasoning off (it is knowledge
+# retrieval), so without this fallback every compounds batch against such an endpoint failed -> retries ->
+# batches dropped -> the whole pass Unknown-filled, while the preflight (which doesn't send the body) passed.
+# Now: retry that request once WITHOUT the body and never send it to that endpoint+model again.
+_NO_REASONING_REJECTED = set()
+
+
+def _endpoint_key(client, model):
+    return (str(getattr(client, "base_url", "") or ""), model or "")
+
+
+def _is_bad_request(e):
+    return getattr(e, "status_code", None) in (400, 422)
+
+
+async def _create_with_reasoning_fallback(client, model, kwargs, disable_reasoning):
+    """chat.completions.create with the no-reasoning body when requested, transparently retried without it
+    if this endpoint+model rejects the body (400/422). Used by classify() and chat()."""
+    key = _endpoint_key(client, model)
+    if disable_reasoning and key not in _NO_REASONING_REJECTED:
+        kwargs["extra_body"] = NO_REASONING_BODY
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        if "extra_body" in kwargs and _is_bad_request(e):
+            _NO_REASONING_REJECTED.add(key)
+            kwargs.pop("extra_body", None)
+            return await client.chat.completions.create(**kwargs)
+        raise
 
 PROVIDERS = ("anthropic", "openai", "gemini", "ollama")
 PROVIDER_LABEL = {"anthropic": "Anthropic (Claude)", "openai": "OpenAI (ChatGPT)",
@@ -266,9 +299,7 @@ async def classify(client, provider, model, system_text, user_obj, tool, max_tok
         tool_choice=({"type": "function", "function": {"name": name}} if provider == "openai"
                      else "required"),
     )
-    if disable_reasoning:
-        kwargs["extra_body"] = NO_REASONING_BODY
-    resp = await client.chat.completions.create(**kwargs)
+    resp = await _create_with_reasoning_fallback(client, model, kwargs, disable_reasoning)
     choice = resp.choices[0].message
     results = []
     tcs = getattr(choice, "tool_calls", None)
@@ -380,9 +411,7 @@ async def chat(client, provider, model, messages, tools=None, system="", max_tok
                             "function": {"name": t["name"], "description": t.get("description", ""),
                                          "parameters": t["input_schema"]}} for t in tools]
         kwargs["tool_choice"] = "auto"
-    if disable_reasoning:
-        kwargs["extra_body"] = NO_REASONING_BODY
-    resp = await client.chat.completions.create(**kwargs)
+    resp = await _create_with_reasoning_fallback(client, model, kwargs, disable_reasoning)
     choice = resp.choices[0].message
     text = getattr(choice, "content", None) or ""
     tcs = []

@@ -61,13 +61,34 @@ if [ ${#GZ[@]} -eq 0 ]; then
   rm -rf "$LOCAL"; exit 1
 fi
 
-# ---- 3) publish to the archive, verify, then delete the source ---------------
-cp -p "$LOCAL/${SAMPLE}"*.fastq.gz "$SDIR/"
+# ---- 3) publish ATOMICALLY to the archive, verify, then delete the source -----
+# Copy EVERY output to a hidden temp name first, verify ALL of them, and only then rename into place. A
+# final-named <acc>*.fastq.gz therefore only ever exists COMPLETE. (The old direct `cp` meant a job killed
+# between _1 and _2 left a lone, final-named _1 -- which the watchdog read as "converted", so it deleted the
+# only other copy of the reads (the .sra) and _2 was lost for good.) An interrupted publish leaves hidden
+# .<file>.part.<job> temps, which the watchdog treats as NOT converted (keeps the .sra, resubmits); the next
+# attempt sweeps them first.
+rm -f "$SDIR/.${SAMPLE}.fastq.gz.part."* "$SDIR/.${SAMPLE}_"[0-9]".fastq.gz.part."* 2>/dev/null   # stale temps (anchored: SRR1 != SRR10)
 ok=1
+TMPS=()
 for g in "$LOCAL/${SAMPLE}"*.fastq.gz; do
   bn=$(basename "$g")
-  if [ ! -f "$SDIR/$bn" ] || [ "$(wc -c < "$g")" != "$(wc -c < "$SDIR/$bn")" ]; then ok=0; fi
+  t="$SDIR/.${bn}.part.${LSB_JOBID:-$$}"
+  if cp -p "$g" "$t" 2>/dev/null && [ "$(wc -c < "$g")" = "$(wc -c < "$t")" ]; then
+    TMPS+=("$t")
+  else
+    ok=0
+  fi
 done
+if [ "$ok" -eq 1 ]; then
+  for t in ${TMPS[@]+"${TMPS[@]}"}; do
+    bn="${t##*/}"; bn="${bn#.}"; bn="${bn%.part.*}"
+    mv -f "$t" "$SDIR/$bn" || ok=0
+  done
+fi
+if [ "$ok" -ne 1 ]; then
+  rm -f ${TMPS[@]+"${TMPS[@]}"} 2>/dev/null   # never leave a half-published set behind
+fi
 if [ "$ok" -eq 1 ]; then
   echo "[fqd] $SAMPLE: ${#GZ[@]} .fastq.gz published to archive OK -> deleting source"
   rm -rf "$LOCAL"

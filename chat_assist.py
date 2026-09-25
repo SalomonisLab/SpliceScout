@@ -64,7 +64,7 @@ def _list_runs():
         try:
             pr = json.load(open(os.path.join(d, "progress.json"), encoding="utf-8"))
             rec["state"] = pr.get("state", "")
-            rec["current"] = (pr.get("current") or {}).get("name", "")
+            rec["current"] = _current_stage(pr)
         except Exception:
             pass
         rec["_mtime"] = os.path.getmtime(d)
@@ -73,6 +73,16 @@ def _list_runs():
     for r in out:
         r.pop("_mtime", None)
     return out
+
+
+def _current_stage(pr):
+    """progress.json's `current` is the active STAGE KEY (a string) with its label in `current_label` --
+    not a dict. (Reading it as {name:...} raised AttributeError, so list_runs/get_run_status returned no
+    stage info at all.) Tolerates an older dict form too."""
+    cur = pr.get("current")
+    if isinstance(cur, dict):
+        return cur.get("label") or cur.get("key") or cur.get("name") or ""
+    return pr.get("current_label") or (cur or "")
 
 
 def _run_status(run_id):
@@ -84,9 +94,11 @@ def _run_status(run_id):
         pr = json.load(open(os.path.join(d, "progress.json"), encoding="utf-8"))
         out["state"] = pr.get("state", "")
         out["error"] = pr.get("error", "")
-        out["current"] = (pr.get("current") or {}).get("name", "")
-        out["stages"] = [{"name": s.get("name"), "status": s.get("status"),
-                          "done": s.get("done"), "total": s.get("total")}
+        out["current"] = _current_stage(pr)
+        # snapshot stages carry key/label (not name) -- see progress.RunReporter.snapshot
+        out["stages"] = [{"name": s.get("label") or s.get("key") or s.get("name"), "key": s.get("key"),
+                          "status": s.get("status"), "done": s.get("done"), "total": s.get("total"),
+                          "detail": s.get("detail")}
                          for s in (pr.get("stages") or [])]
         out["log_tail"] = [e.get("text", "") for e in (pr.get("log") or [])[-12:]]
     except Exception as e:

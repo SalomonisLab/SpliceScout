@@ -36,7 +36,8 @@ reschedule() {
   bed_qopt
   # capture bsub's OWN rc (not star_jobid's pipeline-tail rc) so the safety-net re-arms only on a genuine
   # submit FAILURE, never on a successful-but-unparsed submit (which would double-arm two chains).
-  out=$(bsub -L /bin/bash -n 1 -M 1000 -W 20 -b "$when" -J "${JOB_TAG}_watchdog" \
+  # bounded, as in the download stage: a bsub blocked at the pending-job cap must not hang the pass
+  out=$(timeout "${WATCHDOG_SUBMIT_TIMEOUT:-120}" bsub -L /bin/bash -n 1 -M 1000 -W 20 -b "$when" -J "${JOB_TAG}_watchdog" \
        -o "$LOG_DIR/watchdog.out" -e "$LOG_DIR/watchdog.err" \
        ${QOPT[@]+"${QOPT[@]}"} "$SCRIPTS_DIR/watchdog.sh" 2>&1)
   RESCHED_RC=$?
@@ -67,7 +68,15 @@ bed_cleanup_tools() {
   [ -n "${ALTANALYZE_DIR:-}" ] && [ -e "$ALTANALYZE_DIR" ] && say "cleanup: WARNING -- could not remove $ALTANALYZE_DIR (still present; check perms/NFS)"
   if [ -n "$dlroot" ] && [ "$dlroot" != "/" ] && [ -d "$dlroot/STAR_bams" ] \
      && [ "$(printf '%s' "$dlroot" | awk -F/ '{print NF-1}')" -ge 3 ]; then
-    rm -rf "$dlroot/star" "$dlroot/by_study" 2>/dev/null
+    rm -rf "$dlroot/star" 2>/dev/null
+    # by_study only when it holds NO FASTQ (same rule as STAR finalize): remaining FASTQs are either the user's
+    # keep-FASTQ choice or samples that were never aligned -- never delete data nothing else holds.
+    if [ -d "$dlroot/by_study" ] && [ -n "$(find "$dlroot/by_study" -type f \( -name '*.fastq.gz' \
+         -o -name '*.fq.gz' -o -name '*.fastq' -o -name '*.fq' \) -print -quit 2>/dev/null)" ]; then
+      say "cleanup: KEPT $dlroot/by_study -- FASTQ files remain (keep-FASTQ setting or unaligned samples)"
+    else
+      rm -rf "$dlroot/by_study" 2>/dev/null
+    fi
     rm -f "$dlroot"/*.sh "$dlroot"/*.py 2>/dev/null
     say "cleanup: removed AltAnalyze toolkit/ref + STAR bundle + download scripts (kept BAMs, $BED_OUT_DIR, markers, logs)"
   else
@@ -81,6 +90,7 @@ finalize() {                            # $1 = COMPLETE | STALLED
   local rep="$PIPELINE_ROOT/PIPELINE_${status}.txt"   # SEPARATE line: bash 4.2 + set -u can't see $status declared in the SAME `local`
   # EXACTLY-ONCE (T2.3): atomic mkdir claim (NFS-safe) -- only the first racer does the destructive cleanup.
   bed_finalize_once || { say "finalize already claimed by a concurrent pass -> skip"; return 0; }
+  rm -f "$STATE.firstpass" "$STATE.passes" "$STATE.lastpass" 2>/dev/null   # a later re-arm starts a fresh backstop window
   # Cancel ALL queued/duplicate watchdog successors except THIS job (a double-armed/nudged one would
   # otherwise re-spawn the chain after we stop).
   local _self _wj
@@ -161,6 +171,17 @@ reschedule                       # queue the NEXT pass FIRST (survives a mid-pas
 # ABSOLUTE BACKSTOP (T2.2), bjobs-INDEPENDENT: cap by pass-count AND wall-clock so a permanently-PENDING
 # job or a persistently-broken bjobs can never loop/skip forever with no human signal.
 _now=$(date +%s)
+# A RE-ARMED chain gets a NEW window. The caps bound ONE continuous chain, but the window state survives a finalize,
+# so a stage re-armed later (a targeted re-run, a manual or AI re-arm) inherited its old firstpass and hit the wall
+# cap on its very first pass (the 2026-09-22 K562/A549 re-runs). A gap of BACKSTOP_RESET_GAP_HOURS since the last
+# pass means the chain had stopped -> start over. finalize() clears the window as well. (A state from before this
+# fix has no .lastpass: the .passes file's age stands in for it.)
+_lastp=$(cat "$STATE.lastpass" 2>/dev/null || stat -c %Y "$STATE.passes" 2>/dev/null || echo "$_now")
+if [ "$(( _now - _lastp ))" -ge "$(( ${BACKSTOP_RESET_GAP_HOURS:-12} * 3600 ))" ]; then
+  rm -f "$STATE.firstpass" "$STATE.passes"
+  say "backstop: last pass was $(( (_now - _lastp) / 3600 ))h ago -> re-armed chain, new pass/wall-clock window"
+fi
+echo "$_now" > "$STATE.lastpass"
 [ -f "$STATE.firstpass" ] || echo "$_now" > "$STATE.firstpass"
 _first=$(cat "$STATE.firstpass" 2>/dev/null || echo "$_now")
 _passes=$(( $(cat "$STATE.passes" 2>/dev/null || echo 0) + 1 )); echo "$_passes" > "$STATE.passes"

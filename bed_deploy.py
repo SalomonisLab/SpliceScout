@@ -73,7 +73,7 @@ def _resolve_bed_cfg(bed_cfg):
     return vals
 
 
-def _bed_launch_sh(bam_out_root, bed_tag, check_min=30, max_wait_hours=168):
+def _bed_launch_sh(bam_out_root, bed_tag, check_min=30, max_wait_hours=336):
     """SELF-RESCHEDULING launcher (mirrors star_launch.sh). Each pass is a short LSF job: if STAR has
     finished it launches BED, otherwise it re-queues itself for +CHECK_MIN. Lives entirely on the
     cluster, so SpliceScout can be CLOSED right after the upload.
@@ -115,19 +115,10 @@ def _bed_launch_sh(bam_out_root, bed_tag, check_min=30, max_wait_hours=168):
         "  fi\n"
         '  echo "[bed_launch] run_bed_pipeline.sh FAILED -> will retry in $CHECK_MIN min" >&2\n'
         "fi\n"
-        "# Bounded wait: abort only if past MAX_WAIT_HOURS AND STAR's watchdog.log is stale (dead chain).\n"
-        'STAMP="$HERE/.launch_first_seen"\n'
-        '[ -f "$STAMP" ] || date +%s > "$STAMP" 2>/dev/null\n'
-        'now=$(date +%s); first=$(cat "$STAMP" 2>/dev/null || echo "$now")\n'
-        'upwd="$BAM_OUT/watchdog.log"; up_age=999999999\n'
-        '[ -f "$upwd" ] && up_age=$(( now - $(stat -c %Y "$upwd" 2>/dev/null || echo "$now") ))\n'
-        'if [ "$(( now - first ))" -gt "$(( MAX_WAIT_HOURS * 3600 ))" ] && [ "$up_age" -gt "$(( CHECK_MIN * 180 ))" ]; then\n'
-        '  mkdir -p "$BAM_OUT/bed" 2>/dev/null\n'
-        '  echo "BED launcher gave up at $(date): STAR never finalized and its watchdog.log went stale (>${MAX_WAIT_HOURS}h)." \\\n'
-        '    > "$BAM_OUT/bed/PIPELINE_LAUNCH_TIMEOUT.txt" 2>/dev/null\n'
-        '  echo "[bed_launch] upstream dead -> giving up (PIPELINE_LAUNCH_TIMEOUT.txt written)" >&2; exit 0\n'
-        "fi\n"
-        "when=$(date -d \"+$CHECK_MIN min\" '+%Y:%m:%d:%H:%M' 2>/dev/null) || "
+        + cluster_deploy.launch_wait_sh(
+            "bed_launch", f"{bo}/bed",
+            '"$BAM_OUT/watchdog.log" "${BAM_OUT%/*}/star/.launch_heartbeat" "${BAM_OUT%/*}/watchdog.log"', "STAR")
+        + "when=$(date -d \"+$CHECK_MIN min\" '+%Y:%m:%d:%H:%M' 2>/dev/null) || "
         "when=$(date -v+\"${CHECK_MIN}\"M '+%Y:%m:%d:%H:%M' 2>/dev/null)\n"
         'bsub -L /bin/bash -n 1 -M 1000 -W 66480 -b "$when" -J "${JT}_launch" \\\n'
         '     -o "$BAM_OUT/bed/launch.out" -e "$BAM_OUT/bed/launch.err" \\\n'
@@ -349,9 +340,15 @@ def submit_bed_over_ssh(P, cluster_cfg, secrets, bam_out_root, reporter=NULL, pr
     if prior_skipped:
         # START at BAM->BED (STAR skipped): the launcher polls <BAM_OUT>/PIPELINE_COMPLETE.txt, which no
         # STAR run will write -> pre-create it so BED runs NOW on the BAMs the user already placed in BAM_OUT.
+        # GUARDED exactly like psi_deploy: touch ONLY if no STAR stage ever ran in that folder (no marker AND no
+        # watchdog.log). STAR's watchdog treats this marker as "already finalized" and STOPS -- an unguarded
+        # touch onto a folder where STAR is still RUNNING halted it and let BED convert a partial BAM set.
         _bo = bam_out_root.rstrip("/")
-        launch = f"mkdir -p {shq(_bo)} && touch {shq(_bo + '/PIPELINE_COMPLETE.txt')}; " + launch
-        print(f"  BED SUBMIT: STAR skipped -> pre-touch {_bo}/PIPELINE_COMPLETE.txt (no-wait start)")
+        _sm = _bo + "/PIPELINE_COMPLETE.txt"; _sl = _bo + "/watchdog.log"
+        launch = (f"if [ ! -f {shq(_sm)} ] && [ ! -f {shq(_sl)} ]; then mkdir -p {shq(_bo)} && "
+                  f"touch {shq(_sm)}; fi; " + launch)
+        print(f"  BED SUBMIT: STAR skipped -> pre-touch {_bo}/PIPELINE_COMPLETE.txt ONLY if no STAR ran there "
+              "(else BED waits for the running/finished STAR)")
     print(f"=== BED SUBMIT: {user}@{host}:{port} -> {bed_root} ===")
     try:
         if password:

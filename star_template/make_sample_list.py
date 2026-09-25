@@ -15,10 +15,14 @@ make_sample_list.py -- build a STAR sample list (3-column TSV) from a FASTQ tree
   accession, and listed in <out>.unmapped. Without --runtable, every run is its
   own sample (no merge).
 * Paths in the output are ABSOLUTE. Single-end rows get "NA" in column 3.
+* <run>_3 / _4 ... files (fasterq-dump --split-files writes one file per READ, so a run with index/barcode reads
+  gets _3, _4) are EXTRA reads of <run>, not runs of their own: before, "<run>_3" became a separate single-end
+  "sample". They are left out of the list and reported in <out>.extra.
 * Side reports (nothing is ever silently dropped):
     <out>.orphans  -- a run with a mate missing on disk (R1 w/o R2 etc.)
     <out>.unmapped -- a run on disk with no BioSample in the runtable
     <out>.mixed    -- a run with conflicting roles, or a BioSample mixing layouts
+    <out>.extra    -- extra read files (<run>_3, _4 ...) left out of the alignment
 
 Pure Python 3 standard library (runs on the cluster's python3 3.6.8 -- no pandas,
 no openpyxl). xlsx is intentionally unsupported: export it to CSV first.
@@ -26,6 +30,7 @@ no openpyxl). xlsx is intentionally unsupported: export it to CSV first.
 import argparse
 import csv
 import os
+import re
 import sys
 from collections import OrderedDict
 
@@ -44,7 +49,13 @@ BS_ALIASES = {"biosample", "bio_sample", "biosample accession", "biosample_acces
 LAY_ALIASES = {"librarylayout", "library_layout", "layout", "library layout"}
 
 
+EXTRA_RE = re.compile(r"^(.+)_([3-9])\.(?:fastq|fq)\.gz$")    # <run>_3 / _4 ...: extra (index/barcode) reads
+
+
 def classify(fname):
+    m = EXTRA_RE.match(fname)
+    if m:
+        return m.group(1), "EXTRA"
     for suf, role in SUFFIXES:
         if fname.endswith(suf):
             return fname[:-len(suf)], role
@@ -62,6 +73,9 @@ def scan_disk(root):
                 continue
             ap = os.path.abspath(os.path.join(base, fn))
             d = disk.setdefault(run, {"dir": os.path.abspath(base)})
+            if role == "EXTRA":
+                d.setdefault("EXTRA", []).append(ap)
+                continue
             if role in d and role != "dir":
                 collisions.append((run, "DUP_" + role, "%s | %s" % (d[role], ap)))
             d[role] = ap
@@ -222,6 +236,8 @@ def main():
     p_o, n_o = dump(".orphans", "run\tdir\tissue", sorted(orphans))
     p_u, n_u = dump(".unmapped", "run\tdir", sorted(unmapped))
     p_m, n_m = dump(".mixed", "item\tissue\tdetail", mixed)
+    extra = [(run, f) for run in sorted(disk) for f in disk[run].get("EXTRA", [])]
+    p_x, n_x = dump(".extra", "run\textra_read_file (not aligned)", extra)
 
     print("=" * 64)
     print("sample list : %s" % out)
@@ -237,6 +253,7 @@ def main():
     print("orphan runs (no mate)   : %d -> %s" % (n_o, p_o))
     print("unmapped runs (no BS)   : %d -> %s" % (n_u, p_u))
     print("mixed / collisions      : %d -> %s" % (n_m, p_m))
+    print("extra read files (_3..) : %d -> %s" % (n_x, p_x))
     print("=" * 64)
     if len(rows) == 0:
         print("WARNING: 0 samples -- check --input-dir and the FASTQ naming.")

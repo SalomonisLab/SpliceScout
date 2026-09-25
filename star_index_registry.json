@@ -2,21 +2,22 @@
   "_comment": "Organism -> prebuilt STAR index on THIS cluster (organisms) + build-once reference URLs (reference_urls). Keys are NCBI scientific names (the SraRunTable 'Organism' value), matched case-insensitively. RECOMMENDED: fill organisms.<org>.index_dir with your cluster's prebuilt STAR index (must contain SAindex + Genome) to SKIP the heavy build-once step. gtf is optional (leave '' if the index was built WITH a GTF, the usual case). If index_dir is empty AND no GENOME_DIR is given, the pipeline builds an index once from reference_urls into STAR_INDEX_ROOT/<organism>.",
   "version": 1,
   "organisms": {
-    "homo sapiens": {"index_dir": "", "gtf": "", "assembly": "GRCh38",
-                     "notes": "Fill index_dir with your lab's GRCh38 STAR index path to avoid the build-once step."},
+    "homo sapiens": {"index_dir": "/data/salomonis2/Genomes/STAR-2.7.10b-Index-GRCH38/Grch38-STAR-index", "gtf": "", "assembly": "GRCh38",
+                     "notes": "The Salomonis-lab GRCh38 STAR 2.7.10b index (DEVELOPER_GUIDE). Validated on the cluster (SAindex + Genome) before use; on another cluster it is simply skipped and the next resolution step runs."},
     "mus musculus": {"index_dir": "", "gtf": "", "assembly": "GRCm39"}
   },
   "reference_urls": {
+    "_comment": "FASTA and GTF MUST use the same chromosome naming. Both are Ensembl release 111 ('1..22,X,Y,MT'), which also matches the lab's Ensembl-built BAMs. (The GTF used to be GENCODE ('chr1..chrM') against an Ensembl FASTA, which silently built an index with no annotated junctions; build_star_index.sh now also rewrites a mismatched GTF.)",
     "homo sapiens": {
       "assembly": "GRCh38",
       "fasta_url": "https://ftp.ensembl.org/pub/release-111/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz",
-      "gtf_url": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_44/gencode.v44.primary_assembly.annotation.gtf.gz",
+      "gtf_url": "https://ftp.ensembl.org/pub/release-111/gtf/homo_sapiens/Homo_sapiens.GRCh38.111.gtf.gz",
       "sjdb_overhang": 100
     },
     "mus musculus": {
       "assembly": "GRCm39",
       "fasta_url": "https://ftp.ensembl.org/pub/release-111/fasta/mus_musculus/dna/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz",
-      "gtf_url": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M34/gencode.vM34.primary_assembly.annotation.gtf.gz",
+      "gtf_url": "https://ftp.ensembl.org/pub/release-111/gtf/mus_musculus/Mus_musculus.GRCm39.111.gtf.gz",
       "sjdb_overhang": 100
     }
   }
